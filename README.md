@@ -1,22 +1,25 @@
-# gapshap
+# Gapshap
 
-Local Windows AI agent server.
+Local Windows LLM server and UI.
 
-## Features
+## Structure
 
-- Local LLM using FastAPI + transformers
-- Dark web UI
-- Local authentication hub
-- ChatGPT-style Projects
-- RAG over uploaded documents
-- MCP-style JSON-RPC tool endpoint
-- Web search and URL fetching tools
-- Voice input/output using browser APIs
-- Document and image attachments
+- `app/` FastAPI backend
+- `static/` frontend UI
+- `models/` local model cache, not committed
+- `data/` local config/database, not committed
+- `uploads/` user uploads, not committed
+- `indexes/` RAG indexes, not committed
 
-## Install
+## Security
 
-Double-click:
+This repository intentionally ignores:
 
-```bat
-install.bat
+- virtual environments
+- model weights
+- local databases
+- uploaded files
+- Hugging Face tokens
+- runtime config
+
+Do not commit `.env`, `data/config.json`, or model files.
