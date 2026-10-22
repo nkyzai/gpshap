@@ -1,4 +1,4 @@
-# Gapshap
+# Gpshap
 
 Local Windows LLM server and UI.
 
