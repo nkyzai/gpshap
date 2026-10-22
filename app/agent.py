@@ -6,11 +6,12 @@ from typing import Iterator
 from . import db, llm, rag, tools, vision
 from .config import CONFIG
 
-# FIXED: Properly closed list of strings, added Qwen tool call tags
+
+# FIXED SYNTAX: Properly closed list of strings, added Qwen tool call tags
 STOP_STRINGS = [
     "Observation:",
     "observation:",
-    "\n<|im_start|>user",
+    "\nuser",
     "\nHuman:",
     "\n### Response",
     "\n[TOOL RESULT]",

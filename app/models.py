@@ -10,6 +10,24 @@ MODELS_DIR.mkdir(exist_ok=True)
 
 _download_status = {}
 
+
+MODELS_REGISTRY = [
+    {
+        "id": "qwen3-14b-instruct",
+        "name": "Qwen 3 14B Instruct",
+        "supports_web_search": True,
+        "supports_vision": False,
+        "description": "High capability local model with native web RAG search support."
+    },
+    {
+        "id": "flux-2-klein",
+        "name": "Flux 2 Klein 9B",
+        "supports_web_search": False,
+        "supports_vision": True,
+        "description": "Specialized image generation model."
+    }
+]
+
 def search_models(query: str, limit: int = 20):
     url = "https://huggingface.co/api/models"
     params = {

@@ -272,21 +272,41 @@ First search can take a few seconds while context windows and file sizes are fet
   }
 
   /* ---- actions ---- */
-  async function startDownload(m) {
+  async function startDownload(modelName) {
+    const downloadBtn = document.getElementById(`dl-btn-${modelName}`);
+    const stopBtn = document.getElementById(`stop-dl-btn-${modelName}`);
+    
+    downloadBtn.classList.add('hidden');
+    stopBtn.classList.remove('hidden');
+
     try {
-      await api("/api/models/download", {
-        method: "POST",
-        body: JSON.stringify({ model_id: m.id, kind: m.kind || "llm" })
-      });
-      m.status = "downloading";
-      m.progress = 0;
-      render();
-      pollJobs(true);
-      showBanner(`Downloading ${m.id}\nSaved to H:\\gapshap\\models\\hub — progress updates every second.`, "ok");
-    } catch (e) {
-      showBanner("DOWNLOAD FAILED\n\n" + e.message, "error");
+        await fetch(`/api/models/download?model_name=${encodeURIComponent(modelName)}`, {
+            method: 'POST'
+        });
+    } catch (error) {
+        console.error("Download failed to start:", error);
+        resetDownloadUI(modelName);
     }
-  }
+}
+
+async function cancelDownload(modelName) {
+    try {
+        await fetch(`/api/models/download/cancel?model_name=${encodeURIComponent(modelName)}`, {
+            method: 'POST'
+        });
+    } catch (error) {
+        console.error("Failed to cancel download:", error);
+    } finally {
+        resetDownloadUI(modelName);
+    }
+}
+
+function resetDownloadUI(modelName) {
+    const downloadBtn = document.getElementById(`dl-btn-${modelName}`);
+    const stopBtn = document.getElementById(`stop-dl-btn-${modelName}`);
+    if (downloadBtn) downloadBtn.classList.remove('hidden');
+    if (stopBtn) stopBtn.classList.add('hidden');
+}
 
   async function useModel(m) {
     try {
@@ -458,6 +478,8 @@ First search can take a few seconds while context windows and file sizes are fet
     });
   }
 
+
+
   $("#hub-refresh")?.addEventListener("click", () => loadModels(true));
   $("#hub-diagnose")?.addEventListener("click", diagnose);
 
@@ -485,3 +507,4 @@ First search can take a few seconds while context windows and file sizes are fet
     "Click Diagnose if the table stays empty.",
     "info");
 })();
+

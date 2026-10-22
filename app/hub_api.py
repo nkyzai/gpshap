@@ -12,9 +12,15 @@ import os
 import re
 import threading
 import time
+import asyncio
+from fastapi import APIRouter, HTTPException
+from typing import Dict
+
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from urllib.parse import quote
+
+
 
 import requests
 
@@ -549,3 +555,56 @@ def diagnostics() -> dict:
             "huggingface_hub must be >=1.5,<2.0 for transformers 5.x.",
         ],
     }
+    
+router = APIRouter(prefix="/api/models", tags=["models"])
+
+# Track running download tasks and their cancellation events
+active_downloads: Dict[str, asyncio.Task] = {}
+download_cancel_events: Dict[str, asyncio.Event] = {}
+
+async def download_model_worker(model_name: str, cancel_event: asyncio.Event):
+    """
+    Simulates or performs chunked model downloading with cancellation checks.
+    """
+    try:
+        print(f"Starting download for model: {model_name}")
+        for i in range(1, 101):
+            if cancel_event.is_set():
+                print(f"Download cancelled for model: {model_name}")
+                return
+            # Simulate network download chunk progress
+            await asyncio.sleep(0.1)
+        print(f"Download completed successfully for model: {model_name}")
+    except asyncio.CancelledError:
+        print(f"Download task was cancelled for: {model_name}")
+    finally:
+        active_downloads.pop(model_name, None)
+        download_cancel_events.pop(model_name, None)
+
+@router.post("/download")
+async def start_model_download(model_name: str):
+    if model_name in active_downloads:
+        raise HTTPException(status_code=400, detail="Download already in progress for this model.")
+    
+    cancel_event = asyncio.Event()
+    download_cancel_events[model_name] = cancel_event
+    
+    # Spawn background coroutine so it can be cancelled programmatically
+    task = asyncio.create_task(download_model_worker(model_name, cancel_event))
+    active_downloads[model_name] = task
+    
+    return {"status": "started", "model": model_name}
+
+@router.post("/download/cancel")
+async def cancel_model_download(model_name: str):
+    if model_name not in active_downloads:
+        raise HTTPException(status_code=404, detail="No active download found for this model.")
+    
+    # Trigger event flag and cancel the asyncio task
+    if model_name in download_cancel_events:
+        download_cancel_events[model_name].set()
+    
+    task = active_downloads[model_name]
+    task.cancel()
+    
+    return {"status": "cancelled", "model": model_name}
