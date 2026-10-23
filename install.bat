@@ -13,7 +13,7 @@ if "%PROJECT_ROOT:~-1%"=="\" set "PROJECT_ROOT=%PROJECT_ROOT:~0,-1%"
 set "GAPSHAP_MODEL=Qwen/Qwen2.5-1.5B-Instruct"
 set "GAPSHAP_EMBED_MODEL=sentence-transformers/all-MiniLM-L6-v2"
 set "GAPSHAP_VISION_MODEL=microsoft/Florence-2-base"
-set "GAPSHAP_IMAGE_MODEL=stabilityai/sd-turbo"
+set "GAPSHAP_IMAGE_MODEL=segmind/tiny-sd"
 
 set "DL_MODELS=1"
 set "DL_VISION=0"

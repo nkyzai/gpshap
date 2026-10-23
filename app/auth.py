@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
 from . import db
-from .schemas import AuthRequest
+from .schemas import AuthRequest, PasswordChangeRequest
 
 
 router = APIRouter(tags=["auth"])
@@ -104,6 +104,21 @@ def logout(request: Request, response: Response):
         db.delete_session(token)
 
     response.delete_cookie(COOKIE_NAME)
+    return {"ok": True}
+
+
+@router.post("/password")
+def change_password(body: PasswordChangeRequest, request: Request,
+                    user=Depends(get_current_user)):
+    if not db.verify_password(body.current_password, user["password_hash"]):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+
+    token = extract_token(request)
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    db.update_user_password(user["id"], body.new_password)
+    db.delete_other_sessions(user["id"], token)
     return {"ok": True}
 
 

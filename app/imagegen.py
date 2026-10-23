@@ -49,6 +49,10 @@ def load(model_id: str | None = None, force: bool = False):
     if not model_id:
         raise RuntimeError("No image model configured")
 
+    from . import hub
+    local_path = hub.local_repo_path(model_id)
+    load_source = str(local_path) if hub.is_cached(model_id) else model_id
+
     with _lock:
         if not force and _state["pipe"] is not None and _state["model_id"] == model_id:
             return _state["pipe"]
@@ -68,6 +72,7 @@ def load(model_id: str | None = None, force: bool = False):
             "low_cpu_mem_usage": True,
             "safety_checker": None,
             "requires_safety_checker": False,
+            "local_files_only": load_source != model_id,
             "variant": "fp16" if (dtype == torch.float16 and device != "cpu") else None,
         }
         kwargs.update(dtype_kwargs(dtype))
@@ -75,10 +80,10 @@ def load(model_id: str | None = None, force: bool = False):
                   ("safety_checker", "requires_safety_checker")}
 
         try:
-            pipe = AutoPipelineForText2Image.from_pretrained(model_id, **kwargs)
+            pipe = AutoPipelineForText2Image.from_pretrained(load_source, **kwargs)
         except Exception:
             kwargs.pop("variant", None)
-            pipe = AutoPipelineForText2Image.from_pretrained(model_id, **kwargs)
+            pipe = AutoPipelineForText2Image.from_pretrained(load_source, **kwargs)
 
         pipe = pipe.to(device)
         if hasattr(pipe, "enable_attention_slicing"):

@@ -1,4 +1,5 @@
 import json
+import subprocess
 import time
 from contextlib import closing
 from pathlib import Path
@@ -45,6 +46,7 @@ class MessageUpdateIn(BaseModel):
 class RegenerateIn(BaseModel):
     use_rag: bool = True
     agent_mode: bool = True
+    use_web: bool = False
 
 
 # --------------------------------------------------------------------------
@@ -75,6 +77,8 @@ def system_resources(user=Depends(auth.get_current_user)):
             "allocated_mb": 0,
             "reserved_mb": 0,
             "memory_percent": 0,
+            "utilization_percent": None,
+            "temperature_c": None,
         },
     }
 
@@ -103,6 +107,36 @@ def system_resources(user=Depends(auth.get_current_user)):
             }
         except Exception as exc:
             data["gpu"]["error"] = str(exc)
+
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            check=True,
+            text=True,
+            timeout=3,
+        )
+        values = [value.strip() for value in result.stdout.splitlines()[0].split(",")]
+        if len(values) != 5:
+            raise ValueError("Unexpected nvidia-smi response")
+        name, utilization, used_mb, total_mb, temperature = values
+        gpu = data["gpu"]
+        gpu.update({
+            "available": True,
+            "name": name,
+            "utilization_percent": float(utilization) if utilization != "[N/A]" else None,
+            "used_mb": float(used_mb) if used_mb != "[N/A]" else gpu["used_mb"],
+            "total_mb": float(total_mb) if total_mb != "[N/A]" else gpu["total_mb"],
+            "temperature_c": float(temperature) if temperature != "[N/A]" else None,
+        })
+        if gpu["total_mb"]:
+            gpu["memory_percent"] = round(gpu["used_mb"] / gpu["total_mb"] * 100, 1)
+    except (OSError, subprocess.SubprocessError, IndexError, ValueError):
+        pass
 
     return data
 
@@ -137,6 +171,9 @@ def usage(project_id: int | None = None, user=Depends(auth.get_current_user)):
         total_projects = conn.execute(
             "SELECT COUNT(*) c FROM projects WHERE user_id = ?", (user["id"],)
         ).fetchone()["c"]
+        total_chats = conn.execute(
+            "SELECT COUNT(*) c FROM chats WHERE user_id = ?", (user["id"],)
+        ).fetchone()["c"]
 
         archived_projects = conn.execute(
             "SELECT COUNT(*) c FROM projects WHERE user_id = ? AND archived = 1", (user["id"],)
@@ -149,8 +186,9 @@ def usage(project_id: int | None = None, user=Depends(auth.get_current_user)):
         total_messages = conn.execute(
             """
             SELECT COUNT(*) c FROM messages
-            JOIN projects ON projects.id = messages.project_id
-            WHERE projects.user_id = ?
+            LEFT JOIN chats ON chats.id = messages.chat_id
+            LEFT JOIN projects ON projects.id = COALESCE(chats.project_id, messages.project_id)
+            WHERE COALESCE(chats.user_id, projects.user_id) = ?
             """,
             (user["id"],),
         ).fetchone()["c"]
@@ -158,8 +196,9 @@ def usage(project_id: int | None = None, user=Depends(auth.get_current_user)):
         assistant_messages = conn.execute(
             """
             SELECT COUNT(*) c FROM messages
-            JOIN projects ON projects.id = messages.project_id
-            WHERE projects.user_id = ? AND messages.role = 'assistant'
+            LEFT JOIN chats ON chats.id = messages.chat_id
+            LEFT JOIN projects ON projects.id = COALESCE(chats.project_id, messages.project_id)
+            WHERE COALESCE(chats.user_id, projects.user_id) = ? AND messages.role = 'assistant'
             """,
             (user["id"],),
         ).fetchone()["c"]
@@ -167,8 +206,9 @@ def usage(project_id: int | None = None, user=Depends(auth.get_current_user)):
         user_messages = conn.execute(
             """
             SELECT COUNT(*) c FROM messages
-            JOIN projects ON projects.id = messages.project_id
-            WHERE projects.user_id = ? AND messages.role = 'user'
+            LEFT JOIN chats ON chats.id = messages.chat_id
+            LEFT JOIN projects ON projects.id = COALESCE(chats.project_id, messages.project_id)
+            WHERE COALESCE(chats.user_id, projects.user_id) = ? AND messages.role = 'user'
             """,
             (user["id"],),
         ).fetchone()["c"]
@@ -227,6 +267,7 @@ def usage(project_id: int | None = None, user=Depends(auth.get_current_user)):
             "pinned": pinned_projects,
         },
         "chats": {
+            "total": total_chats,
             "total_messages": total_messages,
             "assistant_messages": assistant_messages,
             "user_messages": user_messages,
@@ -411,11 +452,14 @@ def regenerate_stream(project_id: int, body: RegenerateIn, user=Depends(auth.get
 
     history = history[-int(CONFIG.get("history_messages", 12)):]
     image_paths = [r["stored_path"] for r in db.project_image_files(project_id, 2)]
+    agent.CANCELLED_PROJECTS[project_id] = False
 
     def source():
+        from .main import _exclusive_agent_events
+
         yield sse("start", {"project_id": project_id, "regenerate": True})
         try:
-            for event in agent.run(
+            for event in _exclusive_agent_events(
                 project,
                 project_id,
                 last_user["content"],
@@ -424,11 +468,13 @@ def regenerate_stream(project_id: int, body: RegenerateIn, user=Depends(auth.get
                 body.use_rag,
                 body.agent_mode,
                 image_paths,
+                body.use_web,
             ):
                 yield sse(event["event"], event["data"])
         except Exception as exc:
             yield sse("error", {"message": f"{type(exc).__name__}: {exc}"})
         finally:
+            agent.CANCELLED_PROJECTS.pop(project_id, None)
             yield sse("end", {})
 
     return StreamingResponse(source(), media_type="text/event-stream", headers=SSE_HEADERS)

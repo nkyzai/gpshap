@@ -1,4 +1,5 @@
 import gc
+import logging
 import threading
 import time
 from pathlib import Path
@@ -26,6 +27,7 @@ _state = {
 }
 _lock = threading.RLock()
 _gen_lock = threading.Lock()
+_logger = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------
@@ -388,6 +390,7 @@ def generate_stream(
 
     stop_event = threading.Event()
     streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
+    worker_errors: list[Exception] = []
 
     gen_kwargs = dict(inputs)
     gen_kwargs.update({
@@ -408,9 +411,12 @@ def generate_stream(
             with torch.inference_mode():
                 model.generate(**gen_kwargs)
         except Exception as exc:
-            print(f"[gapshap] generate error: {exc}", flush=True)
+            worker_errors.append(exc)
+            _logger.exception("LLM generation worker failed")
         finally:
             stop_event.set()
+            if worker_errors:
+                streamer.end()
 
     with _gen_lock:
         thread = threading.Thread(target=_run, daemon=True)
@@ -441,6 +447,8 @@ def generate_stream(
             acc = ""
 
         thread.join(timeout=5)
+        if worker_errors:
+            raise RuntimeError("LLM generation failed") from worker_errors[0]
 
 
 def chat(messages: list[dict], tools: list[dict] | None = None, stop: list[str] | None = None,

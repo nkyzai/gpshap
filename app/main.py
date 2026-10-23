@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from . import agent, auth, db, hub, imagegen, llm, rag, tools, vision
 from .config import CONFIG, GENERATED_DIR, INDEX_DIR, STATIC_DIR, UPLOAD_DIR, update_config
 from .mcp import router as mcp_router
+from .model_runtime import MODEL_SESSION_LOCK
 from .schemas import (AnalyzeRequest, AuthRequest, ChatRequest, ImageGenRequest,
                       ModelDownloadRequest, ModelUseRequest, ProjectCreate,
                       SettingsUpdate)
@@ -29,6 +30,38 @@ except Exception as e:
     PLATFORM_ERR = str(e)
 
 app = FastAPI(title="Gpshap", version="2.0.0")
+
+
+def _exclusive_model_events(event_factory, prepare):
+    def stream():
+        with MODEL_SESSION_LOCK:
+            prepare()
+            yield from event_factory()
+
+    return stream()
+
+
+def _exclusive_agent_events(*args, **kwargs):
+    return _exclusive_model_events(
+        lambda: agent.run(*args, **kwargs),
+        _prepare_text_generation,
+    )
+
+
+def _prepare_text_generation():
+    imagegen.unload()
+
+
+def _prepare_image_generation():
+    llm.unload()
+    imagegen.unload()
+
+
+def _warmup_text_model():
+    with MODEL_SESSION_LOCK:
+        _prepare_text_generation()
+        llm.warmup()
+
 
 # 1. Mount API routers FIRST (This fixes the 404/405 errors)
 app.include_router(auth.router, prefix="/api")
@@ -83,8 +116,7 @@ def save_settings(body: SettingsUpdate, user=Depends(auth.get_current_user)):
     prev = {k: CONFIG.get(k) for k in patch}
     update_config(patch)
     if patch.get("model") and patch["model"] != prev.get("model"):
-        llm.unload()
-        threading.Thread(target=llm.warmup, daemon=True).start()
+        threading.Thread(target=_warmup_text_model, daemon=True).start()
     if patch.get("embedding_model") and patch["embedding_model"] != prev.get("embedding_model"):
         rag.unload_embedder()
     if patch.get("vision_model") and patch["vision_model"] != prev.get("vision_model"):
@@ -259,8 +291,10 @@ def _project_context(project_id: int, user: dict, body: ChatRequest):
 @app.post("/api/projects/{project_id}/chat")
 def chat(project_id: int, body: ChatRequest, user=Depends(auth.get_current_user)):
     project, message, history, image_paths = _project_context(project_id, user, body)
-    events = list(agent.run(project, project_id, message, history, user,
-                            body.use_rag, body.agent_mode, image_paths))
+    events = list(_exclusive_agent_events(
+        project, project_id, message, history, user,
+        body.use_rag, body.agent_mode, image_paths, body.use_web,
+    ))
     done = next((e["data"] for e in events if e["event"] == "done"), None)
     error = next((e["data"] for e in events if e["event"] == "error"), None)
     if error and not done:
@@ -282,8 +316,10 @@ def chat_stream(project_id: int, body: ChatRequest, user=Depends(auth.get_curren
     def event_source():
         yield sse("start", {"project_id": project_id, "ts": time.time()})
         try:
-            for event in agent.run(project, project_id, message, history, user,
-                                   body.use_rag, body.agent_mode, image_paths):
+            for event in _exclusive_agent_events(
+                project, project_id, message, history, user,
+                body.use_rag, body.agent_mode, image_paths, body.use_web,
+            ):
                 yield sse(event["event"], event["data"])
                 # Check if cancelled during yield
                 if agent.CANCELLED_PROJECTS.get(project_id):
@@ -299,6 +335,8 @@ def chat_stream(project_id: int, body: ChatRequest, user=Depends(auth.get_curren
 @app.post("/api/projects/{project_id}/chat/stop")
 def stop_chat(project_id: int, user=Depends(auth.get_current_user)):
     """Stop an ongoing generation for a specific project."""
+    if not db.get_project(user["id"], project_id):
+        raise HTTPException(404, "Project not found")
     agent.CANCELLED_PROJECTS[project_id] = True
     return {"ok": True, "stopped": True}
 
@@ -323,6 +361,7 @@ def regenerate_stream(project_id: int, body: dict, user=Depends(auth.get_current
     
     use_rag = bool(body.get("use_rag", True))
     agent_mode = bool(body.get("agent_mode", True))
+    use_web = bool(body.get("use_web", False))
     
     image_paths = [r["stored_path"] for r in db.project_image_files(project_id, 2)]
 
@@ -331,8 +370,10 @@ def regenerate_stream(project_id: int, body: dict, user=Depends(auth.get_current
     def event_source():
         yield sse("start", {"project_id": project_id, "ts": time.time()})
         try:
-            for event in agent.run(project, project_id, last_user["content"], history, user,
-                                   use_rag, agent_mode, image_paths):
+            for event in _exclusive_agent_events(
+                project, project_id, last_user["content"], history, user,
+                use_rag, agent_mode, image_paths, use_web,
+            ):
                 yield sse(event["event"], event["data"])
                 if agent.CANCELLED_PROJECTS.get(project_id):
                     break
@@ -342,6 +383,206 @@ def regenerate_stream(project_id: int, body: dict, user=Depends(auth.get_current
             agent.CANCELLED_PROJECTS.pop(project_id, None)
             yield sse("end", {})
             
+    return StreamingResponse(event_source(), media_type="text/event-stream", headers=SSE_HEADERS)
+
+# --------------------------------------------------------------------------
+# conversations
+# --------------------------------------------------------------------------
+@app.get("/api/chats")
+def get_chats(user=Depends(auth.get_current_user)):
+    return {"chats": [dict(row) for row in db.list_chats(user["id"])]}
+
+
+@app.post("/api/chats")
+def create_chat(body: dict, user=Depends(auth.get_current_user)):
+    project_id = body.get("project_id")
+    if project_id is not None:
+        try:
+            project_id = int(project_id)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "Invalid project_id")
+    title = str(body.get("title") or "New chat").strip()
+    if not title:
+        raise HTTPException(400, "Chat title cannot be empty")
+    try:
+        chat_id = db.create_chat(user["id"], project_id, title)
+    except ValueError:
+        raise HTTPException(404, "Project not found")
+    return {"id": chat_id, "project_id": project_id, "title": title}
+
+
+@app.patch("/api/chats/{chat_id}")
+def patch_chat(chat_id: int, body: dict, user=Depends(auth.get_current_user)):
+    title = str(body.get("title") or "").strip()
+    if not title:
+        raise HTTPException(400, "Chat title cannot be empty")
+    if not db.update_chat_title(user["id"], chat_id, title):
+        raise HTTPException(404, "Chat not found")
+    return {"ok": True}
+
+
+@app.delete("/api/chats/{chat_id}")
+def remove_chat(chat_id: int, user=Depends(auth.get_current_user)):
+    if not db.delete_chat(user["id"], chat_id):
+        raise HTTPException(404, "Chat not found")
+    return {"ok": True}
+
+
+@app.post("/api/chats/{chat_id}/duplicate")
+def duplicate_chat(chat_id: int, user=Depends(auth.get_current_user)):
+    try:
+        new_id = db.duplicate_chat(user["id"], chat_id)
+    except ValueError:
+        raise HTTPException(404, "Chat not found")
+    return {"id": new_id}
+
+
+@app.get("/api/chats/{chat_id}/messages/v2")
+def get_chat_messages(chat_id: int, user=Depends(auth.get_current_user)):
+    if not db.get_chat(user["id"], chat_id):
+        raise HTTPException(404, "Chat not found")
+    out = []
+    for row in db.list_chat_messages(chat_id, 1000):
+        try:
+            meta = json.loads(row["meta"] or "{}")
+        except (TypeError, ValueError):
+            meta = {}
+        out.append({
+            "id": row["id"],
+            "role": row["role"],
+            "content": row["content"],
+            "number": row["number"] or 0,
+            "meta": meta,
+            "created_at": row["created_at"],
+        })
+    return {"messages": out}
+
+
+@app.delete("/api/chats/{chat_id}/messages")
+def clear_chat_messages(chat_id: int, user=Depends(auth.get_current_user)):
+    if not db.get_chat(user["id"], chat_id):
+        raise HTTPException(404, "Chat not found")
+    db.clear_chat(chat_id)
+    return {"ok": True}
+
+
+@app.get("/api/chats/{chat_id}/export")
+def export_chat(chat_id: int, user=Depends(auth.get_current_user)):
+    chat = db.get_chat(user["id"], chat_id)
+    if not chat:
+        raise HTTPException(404, "Chat not found")
+    messages = []
+    for row in db.list_chat_messages(chat_id, 1000000):
+        try:
+            meta = json.loads(row["meta"] or "{}")
+        except (TypeError, ValueError):
+            meta = {}
+        messages.append({
+            "id": row["id"], "role": row["role"], "content": row["content"],
+            "number": row["number"] or 0, "meta": meta, "created_at": row["created_at"],
+        })
+    return JSONResponse(
+        content={"app": "gpshap", "version": 2, "exported_at": time.time(),
+                 "chat": chat, "messages": messages},
+        headers={"Content-Disposition": f'attachment; filename="gpshap_chat_{chat_id}.json"'},
+    )
+
+
+def _chat_context(chat_id: int, body: ChatRequest, user: dict):
+    chat = db.get_chat(user["id"], chat_id)
+    if not chat:
+        raise HTTPException(404, "Chat not found")
+    message = body.message.strip()
+    if not message:
+        raise HTTPException(400, "Message is required")
+    project_id = chat["project_id"]
+    db.add_chat_message(chat_id, project_id, "user", message)
+    history = [
+        {"role": row["role"], "content": row["content"]}
+        for row in db.list_chat_messages(chat_id, 60)
+        if row["role"] in ("user", "assistant")
+    ][-int(CONFIG.get("history_messages", 12)):]
+    image_paths = []
+    if project_id is not None:
+        if body.file_ids:
+            for file_id in body.file_ids:
+                file_row = db.get_file(int(file_id))
+                if file_row and file_row["project_id"] == project_id and file_row["kind"] == "image":
+                    image_paths.append(file_row["stored_path"])
+        if not image_paths:
+            image_paths = [row["stored_path"] for row in db.project_image_files(project_id, 2)]
+    project = {"system_prompt": chat.get("project_system_prompt") or ""}
+    return chat, project_id, project, message, history, image_paths
+
+
+@app.post("/api/chats/{chat_id}/chat/stream")
+def stream_chat(chat_id: int, body: ChatRequest, user=Depends(auth.get_current_user)):
+    chat, project_id, project, message, history, image_paths = _chat_context(chat_id, body, user)
+    agent.CANCELLED_PROJECTS[chat_id] = False
+
+    def event_source():
+        yield sse("start", {"chat_id": chat_id, "project_id": project_id, "ts": time.time()})
+        try:
+            for event in _exclusive_agent_events(
+                project, project_id, message, history, user, body.use_rag,
+                body.agent_mode, image_paths, body.use_web, chat_id=chat_id,
+            ):
+                yield sse(event["event"], event["data"])
+                if agent.CANCELLED_PROJECTS.get(chat_id):
+                    break
+        except Exception as exc:
+            yield sse("error", {"message": f"{type(exc).__name__}: {exc}"})
+        finally:
+            agent.CANCELLED_PROJECTS.pop(chat_id, None)
+            yield sse("end", {})
+
+    return StreamingResponse(event_source(), media_type="text/event-stream", headers=SSE_HEADERS)
+
+
+@app.post("/api/chats/{chat_id}/chat/stop")
+def stop_chat_by_id(chat_id: int, user=Depends(auth.get_current_user)):
+    if not db.get_chat(user["id"], chat_id):
+        raise HTTPException(404, "Chat not found")
+    agent.CANCELLED_PROJECTS[chat_id] = True
+    return {"ok": True, "stopped": True}
+
+
+@app.post("/api/chats/{chat_id}/regenerate/stream")
+def regenerate_chat(chat_id: int, body: dict, user=Depends(auth.get_current_user)):
+    chat = db.get_chat(user["id"], chat_id)
+    if not chat:
+        raise HTTPException(404, "Chat not found")
+    last_user = db.get_last_chat_user_message(chat_id)
+    if not last_user:
+        raise HTTPException(400, "No user message to regenerate")
+    db.delete_trailing_chat_assistant_messages(chat_id)
+    history = [
+        {"role": row["role"], "content": row["content"]}
+        for row in db.list_chat_messages(chat_id, 60)
+        if row["role"] in ("user", "assistant")
+    ][-int(CONFIG.get("history_messages", 12)):]
+    project_id = chat["project_id"]
+    image_paths = [row["stored_path"] for row in db.project_image_files(project_id, 2)] if project_id else []
+    project = {"system_prompt": chat.get("project_system_prompt") or ""}
+    agent.CANCELLED_PROJECTS[chat_id] = False
+
+    def event_source():
+        yield sse("start", {"chat_id": chat_id, "project_id": project_id, "ts": time.time()})
+        try:
+            for event in _exclusive_agent_events(
+                project, project_id, last_user["content"], history, user,
+                bool(body.get("use_rag", True)), bool(body.get("agent_mode", True)),
+                image_paths, bool(body.get("use_web", False)), chat_id=chat_id,
+            ):
+                yield sse(event["event"], event["data"])
+                if agent.CANCELLED_PROJECTS.get(chat_id):
+                    break
+        except Exception as exc:
+            yield sse("error", {"message": f"{type(exc).__name__}: {exc}"})
+        finally:
+            agent.CANCELLED_PROJECTS.pop(chat_id, None)
+            yield sse("end", {})
+
     return StreamingResponse(event_source(), media_type="text/event-stream", headers=SSE_HEADERS)
 
 # --------------------------------------------------------------------------
@@ -509,7 +750,10 @@ def models_download(body: ModelDownloadRequest, user=Depends(auth.get_current_us
 
 @app.post("/api/models/cancel")
 def models_cancel(body: ModelDownloadRequest, user=Depends(auth.get_current_user)):
-    return hub.cancel(body.model_id.strip())
+    result = hub.cancel(body.model_id.strip())
+    if not result["ok"]:
+        raise HTTPException(409, result["error"])
+    return result
 
 @app.post("/api/models/jobs/delete")
 def models_delete_job(body: ModelDownloadRequest, user=Depends(auth.get_current_user)):
@@ -562,43 +806,110 @@ def models_progress(request: Request, user=Depends(auth.get_current_user)):
 # --------------------------------------------------------------------------
 # image generation
 # --------------------------------------------------------------------------
+def _imagegen_context(body: ImageGenRequest, user: dict):
+    project_id = body.project_id
+    if body.chat_id is not None:
+        chat = db.get_chat(user["id"], body.chat_id)
+        if not chat:
+            raise HTTPException(404, "Chat not found")
+        if project_id is not None and project_id != chat["project_id"]:
+            raise HTTPException(400, "Chat does not belong to the selected project")
+        project_id = chat["project_id"]
+    elif project_id is not None and not db.get_project(user["id"], project_id):
+        raise HTTPException(404, "Project not found")
+    return body.chat_id, project_id
+
+
 @app.post("/api/imagegen")
 def do_imagegen(body: ImageGenRequest, user=Depends(auth.get_current_user)):
+    chat_id, project_id = _imagegen_context(body, user)
     if not hub.is_cached(CONFIG.get("image_model") or ""):
         raise HTTPException(400, "Image model not downloaded. Open Models -> install it.")
     job = imagegen.Job(body.prompt)
     imagegen.JOBS[job.id] = job
     try:
-        result = imagegen.generate(body.prompt, body.negative, body.steps, body.width,
-                                   body.height, body.guidance, body.seed, body.model_id,
-                                   job=job)
+        with MODEL_SESSION_LOCK:
+            _prepare_image_generation()
+            result = imagegen.generate(body.prompt, body.negative, body.steps, body.width,
+                                       body.height, body.guidance, body.seed, body.model_id,
+                                       job=job)
     except Exception as exc:
         job.status = "error"
         job.error = str(exc)
         raise HTTPException(500, f"Image generation failed: {exc}")
-    image_id = db.add_generated_image(user["id"], body.project_id, body.prompt, body.negative,
+    image_id = db.add_generated_image(user["id"], project_id, body.prompt, body.negative,
                                       result["filename"], result["width"], result["height"],
                                       result["steps"], result["seed"], result["model"])
     result["id"] = image_id
-    if body.project_id and db.get_project(user["id"], body.project_id):
-        db.add_message(body.project_id, "assistant",
-                       f"Generated image: {body.prompt}", meta={"images": [result]})
+    if chat_id is not None:
+        db.add_chat_message(chat_id, project_id, "assistant",
+                            f"Generated image: {body.prompt}", meta={"images": [result]})
+    elif project_id is not None:
+        db.add_message(project_id, "assistant", f"Generated image: {body.prompt}",
+                       meta={"images": [result]})
     return result
 
 @app.post("/api/imagegen/stream")
 def do_imagegen_stream(body: ImageGenRequest, user=Depends(auth.get_current_user)):
-    if not hub.is_cached(CONFIG.get("image_model") or ""):
-        raise HTTPException(400, "Image model not downloaded. Open Models -> install it.")
+    chat_id, project_id = _imagegen_context(body, user)
     def stream():
         job = imagegen.Job(body.prompt)
         imagegen.JOBS[job.id] = job
         yield sse("job", {"job_id": job.id, "prompt": body.prompt})
+        model_id = body.model_id or CONFIG.get("image_model") or ""
+        if not model_id:
+            yield sse("error", {"message": "No image model is configured."})
+            job.status = "error"
+            job.error = "No image model is configured."
+            return
+
+        if not hub.is_cached(model_id):
+            yield sse("status", {
+                "stage": "First-time setup: downloading the image model and its text encoder, VAE, and pipeline files from Hugging Face. This may take a while."
+            })
+            download = hub.download(model_id, "image")
+            if download.get("ok") is False:
+                job.status = "error"
+                job.error = download.get("error", "Image model download could not start.")
+                yield sse("error", {"message": job.error})
+                return
+            while True:
+                download_job = next(
+                    (entry for entry in hub.jobs() if entry["repo_id"] == model_id),
+                    None,
+                )
+                if download_job is None:
+                    job.status = "error"
+                    job.error = "Image model download ended without a status."
+                    yield sse("error", {"message": job.error})
+                    return
+                yield sse("progress", {
+                    "stage": "download",
+                    "status": download_job["status"],
+                    "downloaded": download_job.get("downloaded", 0),
+                    "total": download_job.get("total", 0),
+                    "message": "Downloading model files and required components…",
+                })
+                if download_job["status"] == "ready":
+                    yield sse("status", {"stage": "Image model ready; loading pipeline"})
+                    break
+                if download_job["status"] == "error":
+                    job.status = "error"
+                    job.error = download_job.get("error", "Image model download failed.")
+                    yield sse("error", {"message": job.error})
+                    return
+                if download_job["status"] == "cancelled":
+                    job.status = "cancelled"
+                    yield sse("error", {"message": "Image model download was cancelled."})
+                    return
+                time.sleep(0.5)
+
         holder: dict = {}
         def worker():
             try:
                 holder["result"] = imagegen.generate(
                     body.prompt, body.negative, body.steps, body.width, body.height,
-                    body.guidance, body.seed, body.model_id, job=job)
+                    body.guidance, body.seed, model_id, job=job)
             except Exception as exc:
                 holder["error"] = str(exc)
                 job.status = "error"
@@ -606,7 +917,7 @@ def do_imagegen_stream(body: ImageGenRequest, user=Depends(auth.get_current_user
         thread = threading.Thread(target=worker, daemon=True)
         thread.start()
         while thread.is_alive():
-            yield sse("progress", {"progress": job.progress, "step": job.step,
+            yield sse("progress", {"stage": "generation", "progress": job.progress, "step": job.step,
                                    "total_steps": job.total_steps, "status": job.status})
             time.sleep(0.4)
         thread.join(timeout=5)
@@ -615,16 +926,23 @@ def do_imagegen_stream(body: ImageGenRequest, user=Depends(auth.get_current_user
             return
         result = holder.get("result") or {}
         image_id = db.add_generated_image(
-            user["id"], body.project_id, body.prompt, body.negative, result.get("filename", ""),
+            user["id"], project_id, body.prompt, body.negative, result.get("filename", ""),
             result.get("width", 0), result.get("height", 0), result.get("steps", 0),
             result.get("seed", 0), result.get("model", ""))
         result["id"] = image_id
-        if body.project_id and db.get_project(user["id"], body.project_id):
-            db.add_message(body.project_id, "assistant",
-                           f"Generated image: {body.prompt}", meta={"images": [result]})
+        if chat_id is not None:
+            db.add_chat_message(chat_id, project_id, "assistant",
+                                f"Generated image: {body.prompt}", meta={"images": [result]})
+        elif project_id is not None:
+            db.add_message(project_id, "assistant", f"Generated image: {body.prompt}",
+                           meta={"images": [result]})
         yield sse("image", {"images": [result]})
         yield sse("done", {})
-    return StreamingResponse(stream(), media_type="text/event-stream", headers=SSE_HEADERS)
+    return StreamingResponse(
+        _exclusive_model_events(stream, _prepare_image_generation),
+        media_type="text/event-stream",
+        headers=SSE_HEADERS,
+    )
 
 @app.get("/api/imagegen/progress/{job_id}")
 def imagegen_progress(job_id: str, user=Depends(auth.get_current_user)):
@@ -654,20 +972,23 @@ def imagegen_delete(image_id: int, user=Depends(auth.get_current_user)):
 # --------------------------------------------------------------------------
 @app.post("/api/engine/unload")
 def engine_unload(user=Depends(auth.get_current_user)):
-    llm.unload()
-    vision.unload()
-    imagegen.unload()
-    rag.unload_embedder()
+    with MODEL_SESSION_LOCK:
+        llm.unload()
+        vision.unload()
+        imagegen.unload()
+        rag.unload_embedder()
     return {"ok": True}
 
 @app.post("/api/engine/load")
 def engine_load(user=Depends(auth.get_current_user)):
-    if CONFIG.get("active_backend") == "llama":
-        path = CONFIG.get("active_model_path")
-        if path:
-            llm.load_gguf_model(path, force=True)
-    else:
-        llm.load(force=True)
+    with MODEL_SESSION_LOCK:
+        _prepare_text_generation()
+        if CONFIG.get("active_backend") == "llama":
+            path = CONFIG.get("active_model_path")
+            if path:
+                llm.load_gguf_model(path, force=True)
+        else:
+            llm.load(force=True)
     return {"ok": True, "llm": llm.info()}
 
 # --------------------------------------------------------------------------
@@ -676,4 +997,4 @@ def engine_load(user=Depends(auth.get_current_user)):
 @app.on_event("startup")
 def startup() -> None:
     db.init_db()
-    threading.Thread(target=llm.warmup, daemon=True).start()
+    threading.Thread(target=_warmup_text_model, daemon=True).start()

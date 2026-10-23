@@ -100,6 +100,11 @@ def list_projects(user: dict | None) -> dict:
     return {"projects": [{"id": r["id"], "name": r["name"]} for r in db.list_projects(user["id"])]}
 
 
+def search_web(query: str) -> list[dict[str, str]]:
+    from .websearch import search_duckduckgo
+    return search_duckduckgo(query)
+
+
 def execute_tool(name: str, arguments: dict | None = None, user: dict | None = None,
                  project_id: int | None = None) -> dict:
     arguments = arguments or {}

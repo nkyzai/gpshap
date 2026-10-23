@@ -6,6 +6,11 @@ class AuthRequest(BaseModel):
     password: str = Field(min_length=1, max_length=200)
 
 
+class PasswordChangeRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=200)
+    new_password: str = Field(min_length=6, max_length=200)
+
+
 class ProjectCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     system_prompt: str = ""
@@ -15,6 +20,7 @@ class ChatRequest(BaseModel):
     message: str = Field(min_length=1)
     use_rag: bool = True
     agent_mode: bool = True
+    use_web: bool = False
     file_ids: list[int] = []
     stream: bool | None = None
 
@@ -46,6 +52,7 @@ class ImageGenRequest(BaseModel):
     seed: int | None = None
     model_id: str | None = None
     project_id: int | None = None
+    chat_id: int | None = None
 
 
 class SettingsUpdate(BaseModel):

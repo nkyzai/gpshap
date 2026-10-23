@@ -32,7 +32,7 @@ DEFAULT_CONFIG = {
     "model": "Qwen/Qwen2.5-1.5B-Instruct",
     "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
     "vision_model": "microsoft/Florence-2-base",
-    "image_model": "stabilityai/sd-turbo",
+    "image_model": "segmind/tiny-sd",
 
     # vision
     "vision_mode": "auto",
@@ -87,6 +87,10 @@ def load_config() -> dict:
         except Exception:
             pass
     else:
+        save_config(config)
+
+    if config.get("image_model") == "stabilityai/sd-turbo":
+        config["image_model"] = DEFAULT_CONFIG["image_model"]
         save_config(config)
     
     token = config.get("hf_token") or ""

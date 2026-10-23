@@ -61,9 +61,19 @@ def init_db() -> None:
                 created_at REAL NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS chats (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+                title TEXT NOT NULL DEFAULT 'New chat',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+                chat_id INTEGER REFERENCES chats(id) ON DELETE CASCADE,
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
                 meta TEXT DEFAULT '{}',
@@ -124,12 +134,69 @@ def init_db() -> None:
         _ensure_column(conn, "models", "backend", "TEXT DEFAULT 'transformers'")
         
         # Ensure other recent columns exist too
+        _ensure_column(conn, "projects", "system_prompt", "TEXT DEFAULT ''")
         _ensure_column(conn, "projects", "sort_order", "INTEGER DEFAULT 0")
         _ensure_column(conn, "projects", "pinned", "INTEGER DEFAULT 0")
         _ensure_column(conn, "projects", "archived", "INTEGER DEFAULT 0")
+        _ensure_column(conn, "projects", "created_at", "REAL NOT NULL DEFAULT 0")
         _ensure_column(conn, "messages", "meta", "TEXT DEFAULT '{}'")
         _ensure_column(conn, "messages", "number", "INTEGER DEFAULT 0")
+        _ensure_column(conn, "messages", "chat_id", "INTEGER REFERENCES chats(id) ON DELETE CASCADE")
         _ensure_column(conn, "files", "kind", "TEXT DEFAULT 'file'")
+
+        message_columns = {
+            row["name"]: row for row in conn.execute("PRAGMA table_info(messages)").fetchall()
+        }
+        if message_columns["project_id"]["notnull"]:
+            conn.execute("PRAGMA foreign_keys=OFF")
+            conn.execute(
+                """
+                CREATE TABLE messages_migrated (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+                    chat_id INTEGER REFERENCES chats(id) ON DELETE CASCADE,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    meta TEXT DEFAULT '{}',
+                    number INTEGER DEFAULT 0,
+                    created_at REAL NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO messages_migrated(id, project_id, chat_id, role, content, meta, number, created_at)
+                SELECT id, project_id, chat_id, role, content, meta, number, created_at FROM messages
+                """
+            )
+            conn.execute("DROP TABLE messages")
+            conn.execute("ALTER TABLE messages_migrated RENAME TO messages")
+            conn.execute("PRAGMA foreign_keys=ON")
+
+        # Existing projects previously represented a single conversation.
+        conn.execute(
+            """
+            INSERT INTO chats(user_id, project_id, title, created_at, updated_at)
+            SELECT p.user_id, p.id, p.name, p.created_at, p.created_at
+            FROM projects p
+            WHERE NOT EXISTS (
+                SELECT 1 FROM chats c WHERE c.project_id = p.id
+            )
+            """
+        )
+        conn.execute(
+            """
+            UPDATE messages
+            SET chat_id = (
+                SELECT c.id FROM chats c
+                WHERE c.project_id = messages.project_id
+                ORDER BY c.id LIMIT 1
+            )
+            WHERE chat_id IS NULL AND project_id IS NOT NULL
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_chats_user_project ON chats(user_id, project_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages(chat_id, id)")
 
         # 3. Backfill assistant response numbers for old rows (if any)
         rows = conn.execute(
@@ -194,6 +261,15 @@ def get_user_by_username(username: str):
         return dict(row) if row else None
 
 
+def update_user_password(user_id: int, password: str) -> None:
+    with closing(get_conn()) as conn:
+        conn.execute(
+            "UPDATE users SET password_hash = ? WHERE id = ?",
+            (hash_password(password), user_id),
+        )
+        conn.commit()
+
+
 def create_session(user_id: int) -> str:
     token = uuid.uuid4().hex
     now = time.time()
@@ -225,6 +301,15 @@ def delete_session(token: str) -> None:
         conn.commit()
 
 
+def delete_other_sessions(user_id: int, current_token: str) -> None:
+    with closing(get_conn()) as conn:
+        conn.execute(
+            "DELETE FROM sessions WHERE user_id = ? AND token != ?",
+            (user_id, current_token),
+        )
+        conn.commit()
+
+
 # --------------------------------------------------------------------------
 # projects
 # --------------------------------------------------------------------------
@@ -251,6 +336,109 @@ def list_projects(user_id: int):
             """,
             (user_id,),
         ).fetchall()
+
+
+def create_chat(user_id: int, project_id: int | None = None, title: str = "New chat") -> int:
+    now = time.time()
+    with closing(get_conn()) as conn:
+        if project_id is not None:
+            project = conn.execute(
+                "SELECT id FROM projects WHERE id = ? AND user_id = ?",
+                (project_id, user_id),
+            ).fetchone()
+            if not project:
+                raise ValueError("project not found")
+        cur = conn.execute(
+            """
+            INSERT INTO chats(user_id, project_id, title, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (user_id, project_id, title.strip() or "New chat", now, now),
+        )
+        conn.commit()
+        return int(cur.lastrowid)
+
+
+def list_chats(user_id: int):
+    with closing(get_conn()) as conn:
+        return conn.execute(
+            """
+            SELECT chats.*, projects.name AS project_name
+            FROM chats
+            LEFT JOIN projects ON projects.id = chats.project_id
+            WHERE chats.user_id = ?
+            ORDER BY chats.updated_at DESC, chats.id DESC
+            """,
+            (user_id,),
+        ).fetchall()
+
+
+def get_chat(user_id: int, chat_id: int):
+    with closing(get_conn()) as conn:
+        row = conn.execute(
+            """
+            SELECT chats.*, projects.name AS project_name,
+                   projects.system_prompt AS project_system_prompt
+            FROM chats
+            LEFT JOIN projects ON projects.id = chats.project_id
+            WHERE chats.id = ? AND chats.user_id = ?
+            """,
+            (chat_id, user_id),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def update_chat_title(user_id: int, chat_id: int, title: str) -> bool:
+    with closing(get_conn()) as conn:
+        cur = conn.execute(
+            "UPDATE chats SET title = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+            (title.strip(), time.time(), chat_id, user_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def delete_chat(user_id: int, chat_id: int) -> bool:
+    with closing(get_conn()) as conn:
+        cur = conn.execute(
+            "DELETE FROM chats WHERE id = ? AND user_id = ?", (chat_id, user_id)
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def duplicate_chat(user_id: int, chat_id: int) -> int:
+    with closing(get_conn()) as conn:
+        chat = conn.execute(
+            "SELECT * FROM chats WHERE id = ? AND user_id = ?", (chat_id, user_id)
+        ).fetchone()
+        if not chat:
+            raise ValueError("chat not found")
+        now = time.time()
+        cur = conn.execute(
+            """
+            INSERT INTO chats(user_id, project_id, title, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (user_id, chat["project_id"], f"{chat['title']} (copy)", now, now),
+        )
+        new_chat_id = int(cur.lastrowid)
+        conn.execute(
+            """
+            INSERT INTO messages(project_id, chat_id, role, content, meta, number, created_at)
+            SELECT project_id, ?, role, content, meta, number, ?
+            FROM messages WHERE chat_id = ? ORDER BY id
+            """,
+            (new_chat_id, now, chat_id),
+        )
+        conn.commit()
+        return new_chat_id
+
+
+def clear_chat(chat_id: int) -> None:
+    with closing(get_conn()) as conn:
+        conn.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
+        conn.commit()
 
 
 def get_project(user_id: int, project_id: int):
@@ -328,25 +516,57 @@ def duplicate_project(user_id: int, project_id: int) -> int:
             ),
         )
         new_id = int(cur.lastrowid)
-        
-        conn.execute(
-            """
-            INSERT INTO messages(project_id, role, content, meta, number, created_at)
-            SELECT ?, role, content, meta, number, ?
-            FROM messages
-            WHERE project_id = ?
-            ORDER BY id
-            """,
-            (new_id, time.time(), project_id),
-        )
-        
-        # Renumber assistant responses in the copied project.
-        assistant_rows = conn.execute(
-            "SELECT id FROM messages WHERE project_id = ? AND role = 'assistant' ORDER BY id",
-            (new_id,),
+        source_chats = conn.execute(
+            "SELECT * FROM chats WHERE user_id = ? AND project_id = ? ORDER BY id",
+            (user_id, project_id),
         ).fetchall()
-        for i, row in enumerate(assistant_rows, start=1):
-            conn.execute("UPDATE messages SET number = ? WHERE id = ?", (i, row["id"]))
+        for source_chat in source_chats:
+            now = time.time()
+            chat_cur = conn.execute(
+                """
+                INSERT INTO chats(user_id, project_id, title, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (user_id, new_id, source_chat["title"], now, now),
+            )
+            new_chat_id = int(chat_cur.lastrowid)
+            conn.execute(
+                """
+                INSERT INTO messages(project_id, chat_id, role, content, meta, number, created_at)
+                SELECT ?, ?, role, content, meta, number, ?
+                FROM messages WHERE chat_id = ? ORDER BY id
+                """,
+                (new_id, new_chat_id, now, source_chat["id"]),
+            )
+            assistant_rows = conn.execute(
+                "SELECT id FROM messages WHERE chat_id = ? AND role = 'assistant' ORDER BY id",
+                (new_chat_id,),
+            ).fetchall()
+            for i, row in enumerate(assistant_rows, start=1):
+                conn.execute("UPDATE messages SET number = ? WHERE id = ?", (i, row["id"]))
+
+        legacy_messages = conn.execute(
+            "SELECT 1 FROM messages WHERE project_id = ? AND chat_id IS NULL LIMIT 1",
+            (project_id,),
+        ).fetchone()
+        if legacy_messages:
+            now = time.time()
+            chat_cur = conn.execute(
+                """
+                INSERT INTO chats(user_id, project_id, title, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (user_id, new_id, project["name"] + " (copy)", now, now),
+            )
+            new_chat_id = int(chat_cur.lastrowid)
+            conn.execute(
+                """
+                INSERT INTO messages(project_id, chat_id, role, content, meta, number, created_at)
+                SELECT ?, ?, role, content, meta, number, ?
+                FROM messages WHERE project_id = ? AND chat_id IS NULL ORDER BY id
+                """,
+                (new_id, new_chat_id, now, project_id),
+            )
         
         conn.commit()
         return new_id
@@ -373,19 +593,28 @@ def _next_assistant_number(conn: sqlite3.Connection, project_id: int) -> int:
     return int(row["next_number"]) if row else 1
 
 
-def add_message(project_id: int, role: str, content: str, meta: dict | None = None) -> int:
+def add_message(project_id: int | None, role: str, content: str, meta: dict | None = None,
+                chat_id: int | None = None) -> int:
     with closing(get_conn()) as conn:
         number = 0
         if role == "assistant":
-            number = _next_assistant_number(conn, project_id)
+            if chat_id is not None:
+                row = conn.execute(
+                    "SELECT COALESCE(MAX(number), 0) + 1 FROM messages WHERE chat_id = ? AND role = 'assistant'",
+                    (chat_id,),
+                ).fetchone()
+                number = int(row[0])
+            elif project_id is not None:
+                number = _next_assistant_number(conn, project_id)
         
         cur = conn.execute(
             """
-            INSERT INTO messages(project_id, role, content, meta, number, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO messages(project_id, chat_id, role, content, meta, number, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 project_id,
+                chat_id,
                 role,
                 content,
                 json.dumps(meta or {}, ensure_ascii=False),
@@ -394,7 +623,56 @@ def add_message(project_id: int, role: str, content: str, meta: dict | None = No
             ),
         )
         conn.commit()
+        if chat_id is not None:
+            conn.execute("UPDATE chats SET updated_at = ? WHERE id = ?", (time.time(), chat_id))
+            if role == "user":
+                conn.execute(
+                    """
+                    UPDATE chats SET title = ?, updated_at = ?
+                    WHERE id = ? AND title = 'New chat'
+                    """,
+                    (content.strip()[:60] or "New chat", time.time(), chat_id),
+                )
+            conn.commit()
         return int(cur.lastrowid)
+
+
+def add_chat_message(chat_id: int, project_id: int | None, role: str, content: str,
+                     meta: dict | None = None) -> int:
+    return add_message(project_id, role, content, meta, chat_id=chat_id)
+
+
+def list_chat_messages(chat_id: int, limit: int = 200):
+    with closing(get_conn()) as conn:
+        rows = conn.execute(
+            "SELECT * FROM messages WHERE chat_id = ? ORDER BY id DESC LIMIT ?",
+            (chat_id, limit),
+        ).fetchall()
+        return list(reversed(rows))
+
+
+def get_last_chat_user_message(chat_id: int):
+    with closing(get_conn()) as conn:
+        row = conn.execute(
+            "SELECT * FROM messages WHERE chat_id = ? AND role = 'user' ORDER BY id DESC LIMIT 1",
+            (chat_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def delete_trailing_chat_assistant_messages(chat_id: int) -> None:
+    with closing(get_conn()) as conn:
+        conn.execute(
+            """
+            DELETE FROM messages
+            WHERE chat_id = ? AND role = 'assistant'
+              AND id > COALESCE(
+                  (SELECT MAX(id) FROM messages WHERE chat_id = ? AND role = 'user'), 0
+              )
+            """,
+            (chat_id, chat_id),
+        )
+        conn.commit()
 
 
 def list_messages(project_id: int, limit: int = 200):
@@ -448,11 +726,12 @@ def update_message_content(message_id: int, user_id: int, content: str,
         row = conn.execute(
             """
             SELECT messages.* FROM messages
-            JOIN projects ON projects.id = messages.project_id
-            WHERE messages.id = ? AND projects.user_id = ?
-            """,
-            (message_id, user_id),
-        ).fetchone()
+        LEFT JOIN chats ON chats.id = messages.chat_id
+        LEFT JOIN projects ON projects.id = COALESCE(chats.project_id, messages.project_id)
+        WHERE messages.id = ? AND COALESCE(chats.user_id, projects.user_id) = ?
+        """,
+        (message_id, user_id),
+    ).fetchone()
         
         if not row:
             return None
@@ -466,10 +745,16 @@ def update_message_content(message_id: int, user_id: int, content: str,
         conn.execute("UPDATE messages SET content = ? WHERE id = ?", (content, message_id))
         
         if truncate_after:
-            conn.execute(
-                "DELETE FROM messages WHERE project_id = ? AND id > ?",
-                (row["project_id"], message_id),
-            )
+            if row["chat_id"] is not None:
+                conn.execute(
+                    "DELETE FROM messages WHERE chat_id = ? AND id > ?",
+                    (row["chat_id"], message_id),
+                )
+            else:
+                conn.execute(
+                    "DELETE FROM messages WHERE project_id = ? AND id > ?",
+                    (row["project_id"], message_id),
+                )
         
         conn.commit()
         return dict(row)
@@ -480,8 +765,9 @@ def delete_message(message_id: int, user_id: int) -> bool:
         row = conn.execute(
             """
             SELECT messages.id FROM messages
-            JOIN projects ON projects.id = messages.project_id
-            WHERE messages.id = ? AND projects.user_id = ?
+            LEFT JOIN chats ON chats.id = messages.chat_id
+            LEFT JOIN projects ON projects.id = COALESCE(chats.project_id, messages.project_id)
+            WHERE messages.id = ? AND COALESCE(chats.user_id, projects.user_id) = ?
             """,
             (message_id, user_id),
         ).fetchone()

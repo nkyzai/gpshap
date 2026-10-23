@@ -1,13 +1,17 @@
 const state = {
   user: null,
   projects: [],
+  chats: [],
+  currentChat: null,
   currentProject: null,
+  expandedProject: null,
   files: [],
   messages: [],
   tab: "chat",
   models: [],
   localOnly: false,
   streaming: false,
+  streamingChatId: null,
   streamAbortController: null,
   pendingFileIds: [],
   theme: localStorage.getItem("gpshap-theme") || "oceanic",
@@ -15,6 +19,7 @@ const state = {
   lastUserMessage: "",
   localModels: [],
   dismissedModelJobs: new Set(),
+  polling: false,
 };
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => Array.from(document.querySelectorAll(s));
@@ -39,6 +44,92 @@ function md(text) {
     return `<p>${p.replace(/\n/g, "<br>")}</p>`;
   }).join("");
   return h;
+}
+async function openProjectResources(project) {
+  const dialog = $("#resources-dialog");
+  const list = $("#resources-list");
+  $("#resources-title").textContent = `${project.name} resources`;
+  list.replaceChildren();
+  const loading = document.createElement("p");
+  loading.className = "small";
+  loading.textContent = "Loading resources…";
+  list.appendChild(loading);
+  $("#upload-resource-btn")?.remove();
+  if (state.currentProject === project.id) {
+    const upload = document.createElement("button");
+    upload.id = "upload-resource-btn";
+    upload.type = "button";
+    upload.className = "secondary";
+    upload.textContent = "Upload resources";
+    upload.onclick = () => $("#file-input").click();
+    $("#resources-dialog").querySelector(".dialog-header").appendChild(upload);
+  }
+  if (!dialog.open) dialog.showModal();
+
+  try {
+    const data = await api(`/api/projects/${project.id}/files`);
+    list.replaceChildren();
+    if (!data.files.length) {
+      const empty = document.createElement("p");
+      empty.className = "small";
+      empty.textContent = "No resources in this project yet.";
+      list.appendChild(empty);
+      return;
+    }
+    for (const file of data.files) {
+      const entry = document.createElement("div");
+      entry.className = "resource-entry";
+      const details = document.createElement("div");
+      details.className = "resource-entry-name";
+      const link = document.createElement("a");
+      link.href = `/api/files/${file.id}`;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = file.filename;
+      details.appendChild(link);
+      const meta = document.createElement("div");
+      meta.className = "small";
+      meta.textContent = `${file.kind} · ${(file.indexed_chars || 0).toLocaleString()} indexed characters`;
+      details.appendChild(meta);
+      const actions = document.createElement("div");
+      actions.className = "resource-entry-actions";
+      if (state.currentProject === project.id) {
+        const attach = document.createElement("button");
+        attach.className = "tiny secondary";
+        attach.type = "button";
+        attach.textContent = state.pendingFileIds.includes(file.id) ? "Detach" : "Attach";
+        attach.onclick = async () => {
+          toggleAttach(file.id);
+          await openProjectResources(project);
+        };
+        actions.appendChild(attach);
+      }
+      const remove = document.createElement("button");
+      remove.className = "tiny danger";
+      remove.type = "button";
+      remove.textContent = "Remove";
+      remove.onclick = async () => {
+        if (!confirm(`Remove "${file.filename}" from this project?`)) return;
+        try {
+          await api(`/api/files/${file.id}`, { method: "DELETE" });
+          if (state.currentProject === project.id) await loadFiles();
+          await loadUsage();
+          await openProjectResources(project);
+        } catch (error) {
+          alert(error.message);
+        }
+      };
+      actions.appendChild(remove);
+      entry.append(details, actions);
+      list.appendChild(entry);
+    }
+  } catch (error) {
+    list.replaceChildren();
+    const failure = document.createElement("p");
+    failure.className = "status-error";
+    failure.textContent = `Could not load resources: ${error.message}`;
+    list.appendChild(failure);
+  }
 }
 
 async function api(path, opts = {}) {
@@ -139,17 +230,25 @@ function cycleTheme() {
 
 /* ---------------- auth / boot ---------------- */
 function renderAuthOnly() {
-  $("#auth-panel").classList.remove("hidden");
-  $("#project-panel").classList.add("hidden");
-  $("#current-project").textContent = "Not signed in";
+  $("#app").classList.add("hidden");
+  $("#auth-screen").classList.remove("hidden");
 }
 function renderApp() {
-  $("#auth-panel").classList.add("hidden");
+  $("#auth-screen").classList.add("hidden");
+  $("#app").classList.remove("hidden");
   $("#project-panel").classList.remove("hidden");
+  $("#username-label").textContent = state.user?.username || "User";
+  $("#profile-name").textContent = state.user?.username || "";
+  $("#profile-summary").setAttribute(
+    "aria-label",
+    `Profile for ${state.user?.username || "user"}`,
+  );
 }
 async function boot() {
+  const startedAt = performance.now();
   applyTheme(state.theme);
   bind();
+  let authenticated = false;
   try {
     const d = await api("/api/me");
     state.user = d.user;
@@ -160,17 +259,32 @@ async function boot() {
       loadResources(),
       loadUsage(),
     ]);
+    authenticated = true;
+  } catch (_) {
+    state.user = null;
+  }
+  const remaining = 3000 - (performance.now() - startedAt);
+  if (remaining > 0) await new Promise((resolve) => setTimeout(resolve, remaining));
+  $("#splash-screen").classList.add("hidden");
+  if (authenticated) {
     renderApp();
     switchTab("chat");
     startPolling();
-  } catch (_) {
+  } else {
     renderAuthOnly();
   }
 }
 async function doAuth(path) {
   const username = $("#auth-username").value.trim();
   const password = $("#auth-password").value;
-  if (!username || !password) return alert("Enter username and password.");
+  const error = $("#auth-error");
+  error.textContent = "";
+  error.classList.add("hidden");
+  if (!username || !password) {
+    error.textContent = "Enter username and password.";
+    error.classList.remove("hidden");
+    return;
+  }
   try {
     const d = await api(path, {
       method: "POST",
@@ -188,18 +302,14 @@ async function doAuth(path) {
     switchTab("chat");
     startPolling();
   } catch (e) {
-    alert(e.message);
+    error.textContent = e.message;
+    error.classList.remove("hidden");
   }
 }
 async function loadStatus() {
   try {
     const s = await api("/api/status");
     const backend = s.llm.backend || "transformers";
-    $("#engine-badge").textContent =
-      `engine: ${s.llm.loaded ? "LLM ready" : "loading…"} · ${s.llm.device}` +
-      `${s.llm.cuda_available ? " · " + (s.llm.gpu_name || "GPU") : ""}` +
-      ` (${backend})`;
-    $("#model-chip").textContent = (s.llm.model_id || "").split("/").pop();
     $("#studio-model").textContent = s.imagegen.model_id || "";
     $("#img-warn").textContent = s.imagegen.cpu_warning
       ? "⚠ CPU diffusion is very slow - lower steps or use a GPU."
@@ -216,9 +326,8 @@ async function loadStatus() {
       `image    : ${s.imagegen.model_id}\n` +
       `disk free: ${s.disk.free_gb ?? "-"} GB (models ${s.disk.models_gb ?? "-"} GB)`;
     $("#runtime-engine").textContent =
-      `Engine: ${s.llm.loaded ? "ready" : "loading"} · ${backend}`;
-    $("#runtime-model").textContent =
-      `Model: ${(s.llm.model_id || "—").split("/").pop()}`;
+      `Engine: ${s.llm.loaded ? "LLM ready" : "loading"} · ${s.llm.device}` +
+      `${s.llm.cuda_available ? " · " + (s.llm.gpu_name || "CUDA") : ""} · ${backend}`;
   } catch (_) {}
 }
 
@@ -237,6 +346,10 @@ function switchTab(tab) {
 }
 
 /* ---------------- context menu ---------------- */
+function isContextMenuTrigger(target) {
+  return target instanceof Element &&
+    target.closest(".p-menu, .chat-item-menu, #project-more-btn");
+}
 function openMenu(x, y, items) {
   const menu = $("#context-menu");
   menu.innerHTML = "";
@@ -264,47 +377,100 @@ function openMenu(x, y, items) {
 function closeMenu() {
   $("#context-menu").classList.add("hidden");
 }
+function dismissMenuOnOutsideClick(event) {
+  const menu = $("#context-menu");
+  if (menu.classList.contains("hidden")) return;
+  if (menu.contains(event.target) || isContextMenuTrigger(event.target)) return;
+  closeMenu();
+}
 
 /* ---------------- projects ---------------- */
 async function loadProjects() {
   const d = await api("/api/projects/v2");
   state.projects = d.projects;
+  const chats = await api("/api/chats");
+  state.chats = chats.chats;
   renderProjects();
-  if (!state.currentProject && state.projects.length) {
-    await selectProject(state.projects[0].id);
+  if (!state.chats.some((chat) => chat.id === state.currentChat)) {
+    if (state.chats.length) {
+      await selectChat(state.chats[0].id);
+    } else {
+      await createChat();
+    }
   }
   await loadUsage();
 }
+async function loadChats() {
+  const d = await api("/api/chats");
+  state.chats = d.chats;
+  renderProjects();
+}
 function currentProject() {
   return state.projects.find((p) => p.id === state.currentProject) || null;
+}
+function activeChat() {
+  return state.chats.find((chat) => chat.id === state.currentChat) || null;
 }
 function renderProjects() {
   const c = $("#project-list");
   c.innerHTML = "";
   const list = state.projects.filter((p) => state.showArchived || !p.archived);
+  const generalChats = state.chats.filter((chat) => chat.project_id == null);
+  const general = document.createElement("section");
+  general.className = "chat-group";
+  const generalTitle = document.createElement("div");
+  generalTitle.className = "chat-group-title";
+  generalTitle.textContent = "General chats";
+  general.appendChild(generalTitle);
+  if (!generalChats.length) {
+    const empty = document.createElement("div");
+    empty.className = "small chat-list-empty";
+    empty.textContent = "No general chats";
+    general.appendChild(empty);
+  }
+  for (const chat of generalChats) general.appendChild(chatItem(chat));
+  c.appendChild(general);
+
   if (!list.length) {
-    c.innerHTML = '<div class="small">No projects yet.</div>';
-    return;
+    const empty = document.createElement("div");
+    empty.className = "small chat-list-empty";
+    empty.textContent = "No projects yet.";
+    c.appendChild(empty);
   }
   for (const p of list) {
+    const group = document.createElement("section");
+    group.className = "chat-group";
     const el = document.createElement("div");
-    el.className = "project-item" +
-      (state.currentProject === p.id ? " active" : "") +
+    el.className = "project-item" + (state.currentProject === p.id ? " active" : "") +
       (p.archived ? " archived" : "");
     el.draggable = true;
     el.dataset.id = String(p.id);
-    const name = document.createElement("span");
-    name.className = "p-name";
+    const name = document.createElement("button");
+    name.className = "project-name-button";
+    name.type = "button";
+    name.setAttribute("aria-expanded", String(state.expandedProject === p.id));
     name.textContent = (p.pinned ? "📌 " : "") + p.name;
-    const menuBtn = document.createElement("span");
-    menuBtn.className = "p-menu";
-    menuBtn.textContent = "⋮";
+    name.onclick = () => selectProject(p.id);
+    const actions = document.createElement("div");
+    actions.className = "project-item-actions";
+    const resourcesBtn = document.createElement("button");
+    resourcesBtn.className = "tiny secondary";
+    resourcesBtn.type = "button";
+    resourcesBtn.textContent = "Resources";
+    resourcesBtn.title = `View resources for ${p.name}`;
+    resourcesBtn.onclick = (e) => {
+      e.stopPropagation();
+      openProjectResources(p);
+    };
+    const menuBtn = document.createElement("button");
+    menuBtn.className = "tiny secondary p-menu";
+    menuBtn.type = "button";
     menuBtn.title = "Project options";
+    menuBtn.textContent = "⋮";
     menuBtn.onclick = (e) => {
       e.stopPropagation();
       openProjectMenu(e.clientX, e.clientY, p);
     };
-    el.onclick = () => selectProject(p.id);
     el.addEventListener("contextmenu", (e) => {
       e.preventDefault();
       e.stopPropagation();
@@ -327,9 +493,41 @@ function renderProjects() {
       ids.splice(toIdx, 0, from);
       await reorderProjects(ids);
     });
-    el.append(name, menuBtn);
-    c.appendChild(el);
+    actions.append(resourcesBtn, menuBtn);
+    el.append(name, actions);
+    group.appendChild(el);
+    if (state.expandedProject === p.id) {
+      const projectChats = state.chats.filter((chat) => chat.project_id === p.id);
+      for (const chat of projectChats) group.appendChild(chatItem(chat));
+      const addChat = document.createElement("button");
+      addChat.className = "project-add-chat";
+      addChat.type = "button";
+      addChat.textContent = "+ New chat";
+      addChat.onclick = () => createChat(p.id);
+      group.appendChild(addChat);
+    }
+    c.appendChild(group);
   }
+}
+function chatItem(chat) {
+  const item = document.createElement("div");
+  item.className = "chat-item" + (state.currentChat === chat.id ? " active" : "");
+  item.title = chat.title;
+  const title = document.createElement("span");
+  title.className = "chat-item-title";
+  title.textContent = chat.title || "New chat";
+  const menu = document.createElement("button");
+  menu.className = "chat-item-menu";
+  menu.type = "button";
+  menu.setAttribute("aria-label", `Options for ${title.textContent}`);
+  menu.textContent = "⋮";
+  menu.onclick = (event) => {
+    event.stopPropagation();
+    openChatMenu(event.clientX, event.clientY, chat);
+  };
+  item.onclick = () => selectChat(chat.id);
+  item.append(title, menu);
+  return item;
 }
 function openProjectMenu(x, y, project) {
   openMenu(x, y, [
@@ -354,27 +552,67 @@ function openProjectMenu(x, y, project) {
     { label: "Delete", danger: true, onClick: () => deleteProject(project) },
   ]);
 }
+function openChatMenu(x, y, chat) {
+  openMenu(x, y, [
+    { label: "Rename chat", onClick: () => renameChat(chat) },
+    { label: "Duplicate chat", onClick: () => duplicateChat(chat) },
+    { label: "Export chat", onClick: () => exportChat(chat) },
+    { label: "Clear chat", onClick: () => clearChat(chat) },
+    { sep: true },
+    { label: "Delete chat", danger: true, onClick: () => deleteChat(chat) },
+  ]);
+}
 async function createProject() {
   const name = prompt("Project name:");
   if (!name || !name.trim()) return;
   const sys = prompt("Optional system prompt:", "") || "";
   try {
-    await api("/api/projects", {
+    const created = await api("/api/projects", {
       method: "POST",
       body: JSON.stringify({ name: name.trim(), system_prompt: sys }),
     });
     await loadProjects();
+    await createChat(created.id);
   } catch (e) {
     alert(e.message);
   }
 }
 async function selectProject(id) {
-  state.currentProject = id;
+  state.expandedProject = id;
+  renderProjects();
+  const existingChat = state.chats.find((chat) => chat.project_id === id);
+  if (existingChat) return selectChat(existingChat.id);
+  return createChat(id);
+}
+async function createChat(projectId = null) {
+  try {
+    const chat = await api("/api/chats", {
+      method: "POST",
+      body: JSON.stringify({ project_id: projectId }),
+    });
+    await loadChats();
+    await selectChat(chat.id);
+  } catch (error) {
+    alert(error.message);
+  }
+}
+async function selectChat(id) {
+  state.currentChat = id;
+  const chat = state.chats.find((entry) => entry.id === id);
+  state.currentProject = chat?.project_id ?? null;
+  state.expandedProject = state.currentProject;
   state.pendingFileIds = [];
   renderProjects();
-  const p = currentProject();
-  $("#current-project").textContent = p ? p.name : "Project";
-  await Promise.all([loadMessages(), loadFiles(), loadUsage()]);
+  $("#current-project").textContent = chat?.title || "New chat";
+  $("#files-upload-btn").disabled = !state.currentProject;
+  if (state.currentProject) {
+    await Promise.all([loadMessages(), loadFiles(), loadUsage()]);
+  } else {
+    state.files = [];
+    $("#file-list").replaceChildren();
+    renderPendingAttachments();
+    await Promise.all([loadMessages(), loadUsage()]);
+  }
 }
 async function patchProject(projectId, patch) {
   try {
@@ -406,6 +644,65 @@ async function exportProject(project) {
     downloadJSON(`gpshap_project_${project.id}.json`, data);
   } catch (e) {
     alert(e.message);
+  }
+}
+async function renameChat(chat) {
+  const title = prompt("Rename chat:", chat.title);
+  if (!title || !title.trim()) return;
+  try {
+    await api(`/api/chats/${chat.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ title: title.trim() }),
+    });
+    await loadChats();
+    if (state.currentChat === chat.id) {
+      $("#current-project").textContent = title.trim();
+    }
+  } catch (error) {
+    alert(error.message);
+  }
+}
+async function duplicateChat(chat) {
+  try {
+    const result = await api(`/api/chats/${chat.id}/duplicate`, { method: "POST" });
+    await loadChats();
+    await selectChat(result.id);
+  } catch (error) {
+    alert(error.message);
+  }
+}
+async function exportChat(chat) {
+  try {
+    const data = await api(`/api/chats/${chat.id}/export`);
+    downloadJSON(`gpshap_chat_${chat.id}.json`, data);
+  } catch (error) {
+    alert(error.message);
+  }
+}
+async function clearChat(chat) {
+  if (!confirm(`Clear all messages in "${chat.title}"?`)) return;
+  try {
+    await api(`/api/chats/${chat.id}/messages`, { method: "DELETE" });
+    if (state.currentChat === chat.id) await loadMessages();
+    await loadChats();
+    await loadUsage();
+  } catch (error) {
+    alert(error.message);
+  }
+}
+async function deleteChat(chat) {
+  if (!confirm(`Delete chat "${chat.title}" permanently?`)) return;
+  try {
+    await api(`/api/chats/${chat.id}`, { method: "DELETE" });
+    if (state.currentChat === chat.id) {
+      state.currentChat = null;
+      state.currentProject = null;
+      state.messages = [];
+      renderMessages();
+    }
+    await loadProjects();
+  } catch (error) {
+    alert(error.message);
   }
 }
 async function deleteProject(project) {
@@ -455,8 +752,8 @@ async function reorderProjects(ids) {
 
 /* ---------------- messages ---------------- */
 async function loadMessages() {
-  if (!state.currentProject) return;
-  const d = await api(`/api/projects/${state.currentProject}/messages/v2`);
+  if (!state.currentChat) return;
+  const d = await api(`/api/chats/${state.currentChat}/messages/v2`);
   state.messages = d.messages;
   const lastUser = [...state.messages].reverse().find((m) => m.role === "user");
   state.lastUserMessage = lastUser ? lastUser.content : "";
@@ -469,6 +766,10 @@ function renderMessages() {
   for (const m of state.messages) {
     chat.appendChild(messageDom(m, lastAssistant && m.id === lastAssistant.id));
   }
+  $("#chat-empty-actions").classList.toggle(
+    "hidden",
+    !state.currentChat || Boolean(lastAssistant),
+  );
   chat.scrollTop = chat.scrollHeight;
 }
 function messageDom(m, isLastAssistant) {
@@ -482,36 +783,87 @@ function messageDom(m, isLastAssistant) {
     num.textContent = `#${m.number}`;
     head.appendChild(num);
   }
-  const actions = document.createElement("div");
-  actions.className = "msg-actions";
-  const copyBtn = document.createElement("button");
-  copyBtn.textContent = "Copy";
-  copyBtn.onclick = () => navigator.clipboard.writeText(m.content);
-  actions.appendChild(copyBtn);
-  if (m.role === "user") {
-    const editBtn = document.createElement("button");
-    editBtn.textContent = "Edit";
-    editBtn.onclick = () => editMessage(m);
-    actions.appendChild(editBtn);
-  }
-  if (m.role === "assistant" && isLastAssistant) {
-    const regenBtn = document.createElement("button");
-    regenBtn.textContent = "Regenerate";
-    regenBtn.onclick = () => streamChat(true);
-    actions.appendChild(regenBtn);
-  }
-  const delBtn = document.createElement("button");
-  delBtn.textContent = "Delete";
-  delBtn.onclick = () => deleteMessage(m);
-  actions.appendChild(delBtn);
-  head.appendChild(actions);
   el.appendChild(head);
   const body = document.createElement("div");
   body.className = "body";
   body.innerHTML = m.role === "assistant" ? md(m.content) : esc(m.content).replace(/\n/g, "<br>");
   el.appendChild(body);
   addMeta(el, m.meta || {});
+  const actions = document.createElement("div");
+  actions.className = "msg-actions";
+  const copyBtn = document.createElement("button");
+  copyBtn.className = "message-action";
+  copyBtn.type = "button";
+  copyBtn.setAttribute("aria-label", m.role === "assistant" ? "Copy response" : "Copy message");
+  copyBtn.title = "Copy";
+  copyBtn.innerHTML = '<svg aria-hidden="true" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg>';
+  copyBtn.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(m.content);
+      copyBtn.title = "Copied";
+    } catch (error) {
+      alert(`Could not copy message: ${error.message}`);
+    }
+  };
+  actions.appendChild(copyBtn);
+  if (m.role === "assistant") {
+    for (const [label, icon] of [
+      ["Like response", "&#128077;"],
+      ["Dislike response", "&#128078;"],
+    ]) {
+      const vote = document.createElement("button");
+      vote.className = "message-action vote-action";
+      vote.type = "button";
+      vote.setAttribute("aria-label", label);
+      vote.setAttribute("aria-pressed", "false");
+      vote.title = label;
+      vote.innerHTML = icon;
+      vote.onclick = () => {
+        const wasPressed = vote.getAttribute("aria-pressed") === "true";
+        actions.querySelectorAll(".vote-action").forEach((button) => {
+          button.setAttribute("aria-pressed", "false");
+        });
+        vote.setAttribute("aria-pressed", String(!wasPressed));
+      };
+      actions.appendChild(vote);
+    }
+  }
+  const moreBtn = document.createElement("button");
+  moreBtn.className = "message-action";
+  moreBtn.type = "button";
+  moreBtn.setAttribute("aria-label", "More chat actions");
+  moreBtn.title = "More";
+  moreBtn.textContent = "⋯";
+  moreBtn.onclick = (event) => {
+    event.stopPropagation();
+    openMessageMenu(event, m, isLastAssistant);
+  };
+  actions.appendChild(moreBtn);
+  el.appendChild(actions);
   return el;
+}
+function openMessageMenu(event, message, isLastAssistant) {
+  event.stopPropagation();
+  const chat = activeChat();
+  const items = [];
+  if (message.role === "user") {
+    items.push({ label: "Edit message", onClick: () => editMessage(message) });
+  }
+  items.push({ label: "Delete message", danger: true, onClick: () => deleteMessage(message) });
+  if (message.role === "assistant" && isLastAssistant) {
+    items.unshift({ label: "Regenerate response", onClick: () => streamChat(true) });
+  }
+  if (isLastAssistant && chat) {
+    items.push(
+      { sep: true },
+      { label: "Rename chat", onClick: () => renameChat(chat) },
+      { label: "Duplicate chat", onClick: () => duplicateChat(chat) },
+      { label: "Export chat", onClick: () => exportChat(chat) },
+      { label: "Clear chat", onClick: () => clearChat(chat) },
+      { label: "Delete chat", danger: true, onClick: () => deleteChat(chat) },
+    );
+  }
+  openMenu(event.clientX, event.clientY, items);
 }
 function addMeta(el, meta) {
   const chips = document.createElement("div");
@@ -524,6 +876,9 @@ function addMeta(el, meta) {
   }
   if ((meta.sources || []).length) {
     chips.insertAdjacentHTML("beforeend", `<span class="chip">📚 ${meta.sources.length} sources</span>`);
+  }
+  if ((meta.web_sources || []).length) {
+    chips.insertAdjacentHTML("beforeend", `<span class="chip">🌐 ${meta.web_sources.length} web results</span>`);
   }
   if (chips.childElementCount) el.appendChild(chips);
   for (const img of meta.images || []) {
@@ -541,6 +896,36 @@ function addMeta(el, meta) {
       const item = document.createElement("div");
       item.className = "meta-item";
       item.textContent = `${s.metadata?.filename ? s.metadata.filename + " — " : ""}${s.text || ""}`;
+      d.appendChild(item);
+    }
+    el.appendChild(d);
+  }
+  if ((meta.web_sources || []).length || meta.web_search_error) {
+    const d = document.createElement("details");
+    d.className = "meta-box";
+    const summary = document.createElement("summary");
+    summary.textContent = "Web search";
+    d.appendChild(summary);
+    if (meta.web_search_error) {
+      const error = document.createElement("div");
+      error.className = "meta-item status-error";
+      error.textContent = `Search failed: ${meta.web_search_error}`;
+      d.appendChild(error);
+    }
+    for (const source of meta.web_sources || []) {
+      const item = document.createElement("div");
+      item.className = "meta-item";
+      const link = document.createElement("a");
+      link.href = source.url;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = source.title || source.url;
+      item.appendChild(link);
+      if (source.snippet) {
+        const snippet = document.createElement("div");
+        snippet.textContent = source.snippet;
+        item.appendChild(snippet);
+      }
       d.appendChild(item);
     }
     el.appendChild(d);
@@ -599,33 +984,36 @@ async function deleteMessage(m) {
   }
 }
 async function streamChat(regenerate = false) {
-  if (!state.currentProject) return alert("Select or create a project first.");
+  if (!state.currentChat) return alert("Create or select a chat first.");
   if (state.streaming) return;
   const use_rag = $("#use-rag").checked;
   const agent_mode = $("#agent-mode").checked;
+  const use_web = $("#use-web").checked;
   let url;
   let body;
   if (regenerate) {
     if (!state.lastUserMessage) return alert("No user message to regenerate.");
-    url = `/api/projects/${state.currentProject}/regenerate/stream`;
-    body = { use_rag, agent_mode };
+    url = `/api/chats/${state.currentChat}/regenerate/stream`;
+    body = { use_rag, agent_mode, use_web };
   } else {
     const text = $("#input").value.trim();
     if (!text) return;
     $("#input").value = "";
     addTemporaryUser(text);
     state.lastUserMessage = text;
-    url = `/api/projects/${state.currentProject}/chat/stream`;
+    url = `/api/chats/${state.currentChat}/chat/stream`;
     body = {
       message: text,
       use_rag,
       agent_mode,
+      use_web,
       file_ids: state.pendingFileIds,
     };
     state.pendingFileIds = [];
     renderPendingAttachments();
   }
   state.streaming = true;
+  state.streamingChatId = state.currentChat;
   const controller = new AbortController();
   state.streamAbortController = controller;
   $("#send-btn").classList.add("hidden");
@@ -633,6 +1021,7 @@ async function streamChat(regenerate = false) {
   
   const node = addTemporaryAssistant();
   let acc = "";
+  let streamError = "";
   try {
     await ssePost(url, body, (ev, data) => {
       if (ev === "status") {
@@ -649,10 +1038,15 @@ async function streamChat(regenerate = false) {
       } else if (ev === "done") {
         acc = data.answer || acc;
       } else if (ev === "error") {
-        node.body.innerHTML = `<span class="status-error">Error: ${esc(data.message)}</span>`;
+        streamError = data.message || "The model could not complete this response.";
+        node.el.classList.remove("streaming");
+        node.body.innerHTML = `<span class="status-error">Error: ${esc(streamError)}</span>`;
       }
     }, controller.signal);
-    await Promise.all([loadMessages(), loadUsage(), loadFiles(), loadModelSelect()]);
+    await Promise.all([loadUsage(), loadChats(), loadFiles(), loadModelSelect()]);
+    const chat = activeChat();
+    if (chat) $("#current-project").textContent = chat.title;
+    if (!streamError) await loadMessages();
   } catch (e) {
     node.el.classList.remove("streaming");
     if (e.name === "AbortError") {
@@ -662,6 +1056,7 @@ async function streamChat(regenerate = false) {
     }
   } finally {
     state.streaming = false;
+    state.streamingChatId = null;
     state.streamAbortController = null;
     $("#send-btn").classList.remove("hidden");
     $("#stop-btn").classList.add("hidden");
@@ -670,18 +1065,24 @@ async function streamChat(regenerate = false) {
 
 async function stopChat() {
   if (!state.streaming) return;
-  state.streamAbortController?.abort();
-  if (!state.currentProject) return;
+  if (!state.streamingChatId) return;
   try {
-    await api(`/api/projects/${state.currentProject}/chat/stop`, { method: "POST" });
+    await api(`/api/chats/${state.streamingChatId}/chat/stop`, { method: "POST" });
   } catch (e) {
     console.error("Failed to stop chat", e);
+    alert(`The server could not confirm cancellation. Generation may continue in the background: ${e.message}`);
+  } finally {
+    state.streamAbortController?.abort();
   }
 }
 
 /* ---------------- files / attachments ---------------- */
 async function loadFiles() {
-  if (!state.currentProject) return;
+  if (!state.currentProject) {
+    state.files = [];
+    renderFiles();
+    return;
+  }
   const d = await api(`/api/projects/${state.currentProject}/files`);
   state.files = d.files;
   state.pendingFileIds = state.pendingFileIds.filter((id) =>
@@ -691,6 +1092,7 @@ async function loadFiles() {
 }
 function renderFiles() {
   const c = $("#file-list");
+  if (!c) return;
   c.innerHTML = "";
   if (!state.files.length) {
     c.innerHTML = '<div class="small">No files yet.</div>';
@@ -724,12 +1126,6 @@ function renderFiles() {
     meta.className = "small";
     meta.textContent = `${f.kind} · ${(f.indexed_chars || 0).toLocaleString()} chars indexed`;
     item.appendChild(meta);
-    if (f.kind === "image") {
-      const img = document.createElement("img");
-      img.src = `/api/files/${f.id}`;
-      img.alt = f.filename;
-      item.appendChild(img);
-    }
     c.appendChild(item);
   }
   renderPendingAttachments();
@@ -781,6 +1177,8 @@ async function uploadFiles(list) {
     }
   }
   await Promise.all([loadFiles(), loadUsage()]);
+  const project = currentProject();
+  if (project && $("#resources-dialog").open) await openProjectResources(project);
 }
 async function deleteFile(fileId) {
   if (!confirm("Remove this file from the project and RAG index?")) return;
@@ -929,7 +1327,11 @@ function renderModels() {
       </td>
       <td>${esc(m.kind || "-")}</td>
       <td>${m.params_billion ? m.params_billion + "B" : "-"}</td>
-      <td>${fmtBytes(m.local_bytes || m.size_bytes)}${m.size_estimated ? '<span class="small">~</span>' : ""}</td>
+      <td title="${m.local_bytes != null ? "Actual files currently on disk" : m.size_estimated ? "Estimated from model metadata" : "Reported model repository size"}">
+        ${fmtBytes(m.local_bytes ?? m.size_bytes)}
+        ${m.local_bytes != null ? '<span class="small">(on disk)</span>' :
+          m.size_estimated ? '<span class="small">(estimate)</span>' : ""}
+      </td>
       <td>${fmtCtx(m.context_tokens)}</td>
       <td>${caps || "-"}</td>
       <td class="small">${m.downloads ? (m.downloads > 1e6 ? (m.downloads / 1e6).toFixed(1) + "M" : m.downloads > 1e3 ? (m.downloads / 1e3).toFixed(0) + "k" : m.downloads) : "-"}${m.likes ? ` · ♥${m.likes}` : ""}</td>
@@ -1119,51 +1521,180 @@ function showModelDetails(m) {
   d.textContent = JSON.stringify(m, null, 2);
 }
 
+async function loadGallery() {
+  try {
+    const data = await api("/api/imagegen/gallery");
+    const gallery = $("#img-gallery");
+    gallery.replaceChildren();
+    for (const image of data.images) {
+      const item = document.createElement("div");
+      item.className = "gal-item";
+      const img = document.createElement("img");
+      img.src = image.url;
+      img.alt = image.prompt || "Generated image";
+      img.loading = "lazy";
+      img.onclick = () => window.open(image.url, "_blank", "noopener");
+      item.appendChild(img);
+      const caption = document.createElement("div");
+      caption.className = "cap";
+      caption.textContent = image.prompt || image.filename;
+      item.appendChild(caption);
+      gallery.appendChild(item);
+    }
+  } catch (error) {
+    $("#img-message").textContent = `Could not load image gallery: ${error.message}`;
+  }
+}
+
+async function generateImage() {
+  const prompt = $("#img-prompt").value.trim();
+  if (!prompt) {
+    $("#img-message").textContent = "Enter an image prompt first.";
+    $("#img-prompt").focus();
+    return;
+  }
+
+  const button = $("#img-go");
+  const progress = $("#img-progress");
+  const fill = progress.querySelector(".bar-fill");
+  const step = $("#img-step");
+  const status = $("#img-message");
+  let streamError = "";
+  button.disabled = true;
+  progress.classList.remove("hidden");
+  fill.style.width = "0%";
+  status.textContent = "Preparing image generation…";
+  $("#img-current").replaceChildren();
+
+  try {
+    await ssePost("/api/imagegen/stream", {
+      prompt,
+      negative: $("#img-negative").value,
+      steps: Number($("#img-steps").value),
+      guidance: Number($("#img-guidance").value),
+      width: Number($("#img-width").value),
+      height: Number($("#img-height").value),
+      seed: Number($("#img-seed").value) < 0 ? null : Number($("#img-seed").value),
+      project_id: state.currentProject,
+      chat_id: state.currentChat,
+    }, (event, data) => {
+      if (event === "status") {
+        status.textContent = data.stage || "Preparing image model…";
+        if (data.stage?.startsWith("First-time setup")) {
+          step.textContent = "First-time model setup may take several minutes.";
+        }
+      } else if (event === "progress") {
+        if (data.stage === "generation") {
+          fill.style.width = `${Math.round((data.progress || 0) * 100)}%`;
+          step.textContent = data.total_steps
+            ? `Generating image: step ${data.step}/${data.total_steps}`
+            : "Loading image-generation components…";
+        } else {
+          const downloaded = fmtBytes(data.downloaded);
+          const total = data.total ? ` of ${fmtBytes(data.total)}` : "";
+          step.textContent = `${data.message || "Downloading image model"} ${downloaded}${total}`;
+        }
+      } else if (event === "image") {
+        const result = data.images?.[0];
+        if (result) {
+          const img = document.createElement("img");
+          img.src = result.url;
+          img.alt = result.prompt || "Generated image";
+          $("#img-current").replaceChildren(img);
+          fill.style.width = "100%";
+          status.textContent = "Image generated and saved locally.";
+        }
+      } else if (event === "error") {
+        streamError = data.message || "Image generation failed.";
+        status.textContent = streamError;
+      } else if (event === "done" && !streamError) {
+        status.textContent = "Image generation complete.";
+      }
+    });
+    if (streamError) throw new Error(streamError);
+    await loadGallery();
+  } catch (error) {
+    status.textContent = `Image generation failed: ${error.message}`;
+  } finally {
+    button.disabled = false;
+  }
+}
+
 /* ---------------- bindings ---------------- */
 function bind() {
-  $("#login-btn").onclick = () => doAuth("/api/auth/login");
-  $("#register-btn").onclick = () => doAuth("/api/auth/register");
+  document.addEventListener("click", dismissMenuOnOutsideClick);
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeMenu();
+  });
+  $("#auth-form").onsubmit = (event) => {
+    event.preventDefault();
+    doAuth("/api/login");
+  };
+  $("#register-btn").onclick = () => doAuth("/api/register");
+  $("#password-form").onsubmit = async (event) => {
+    event.preventDefault();
+    const error = $("#password-error");
+    error.classList.add("hidden");
+    error.textContent = "";
+    const currentPassword = $("#current-password").value;
+    const newPassword = $("#new-password").value;
+    if (newPassword !== $("#confirm-password").value) {
+      error.textContent = "New passwords do not match.";
+      error.classList.remove("hidden");
+      return;
+    }
+    try {
+      await api("/api/password", {
+        method: "POST",
+        body: JSON.stringify({
+          current_password: currentPassword,
+          new_password: newPassword,
+        }),
+      });
+      $("#password-dialog").close();
+      $("#password-form").reset();
+      alert("Password updated. Other active sessions have been signed out.");
+    } catch (e) {
+      error.textContent = e.message;
+      error.classList.remove("hidden");
+    }
+  };
+  $("#change-password-btn").onclick = () => {
+    $("#user-menu").open = false;
+    $("#password-dialog").showModal();
+    $("#current-password").focus();
+  };
+  $("#password-close").onclick = () => $("#password-dialog").close();
+  $("#feedback-btn").onclick = () => {
+    $("#user-menu").open = false;
+    $("#feedback-status").textContent = "";
+    $("#feedback-dialog").showModal();
+    $("#feedback-message").focus();
+  };
+  $("#feedback-close").onclick = () => $("#feedback-dialog").close();
+  $("#feedback-form").onsubmit = (event) => {
+    event.preventDefault();
+    const message = $("#feedback-message").value.trim();
+    if (!message) return;
+    const subject = encodeURIComponent("Gpshap feedback");
+    const body = encodeURIComponent(message);
+    window.location.href = `mailto:gpshap@gmail.com?subject=${subject}&body=${body}`;
+    $("#feedback-status").textContent =
+      "Your email app should open with this draft. Review it and send it there; Gpshap does not send or save feedback.";
+  };
+  $("#resources-close").onclick = () => $("#resources-dialog").close();
   $("#logout-btn").onclick = async () => {
-    await api("/api/auth/logout", { method: "POST" });
+    await api("/api/logout", { method: "POST" });
     state.user = null;
+    $("#user-menu").open = false;
     renderAuthOnly();
   };
+  $("#new-chat-btn").onclick = () => createChat();
   $("#new-project-btn").onclick = createProject;
-  $("#project-rename").onclick = () => {
-    const p = currentProject();
-    if (p) renameProject(p);
-  };
-  $("#project-duplicate").onclick = () => {
-    const p = currentProject();
-    if (p) duplicateProject(p);
-  };
-  $("#project-export").onclick = () => {
-    const p = currentProject();
-    if (p) exportProject(p);
-  };
-  $("#project-move-up").onclick = () => {
-    const p = currentProject();
-    if (p) moveProject(p.id, -1);
-  };
-  $("#project-move-down").onclick = () => {
-    const p = currentProject();
-    if (p) moveProject(p.id, 1);
-  };
-  $("#project-pin").onclick = () => {
-    const p = currentProject();
-    if (p) patchProject(p.id, { pinned: !p.pinned });
-  };
-  $("#project-archive").onclick = () => {
-    const p = currentProject();
-    if (p) patchProject(p.id, { archived: !p.archived });
-  };
-  $("#project-clear").onclick = () => {
-    const p = currentProject();
-    if (p) clearProject(p);
-  };
-  $("#project-delete").onclick = () => {
-    const p = currentProject();
-    if (p) deleteProject(p);
+  $("#project-more-btn").onclick = (event) => {
+    event.stopPropagation();
+    const project = currentProject();
+    if (project) openProjectMenu(event.clientX, event.clientY, project);
   };
   $("#show-archived").onchange = (e) => {
     state.showArchived = e.target.checked;
@@ -1174,18 +1705,14 @@ function bind() {
     uploadFiles(e.target.files);
     e.target.value = "";
   };
-  $("#files-refresh-btn").onclick = loadFiles;
   $$(".tab").forEach((b) => {
     b.onclick = () => switchTab(b.dataset.tab);
   });
-  $("#model-manage-btn").onclick = () => switchTab("models");
-  $("#theme-btn").onclick = cycleTheme;
   $("#sidebar-toggle").onclick = () => {
     document.body.classList.toggle("sidebar-open");
     $("#sidebar-toggle").setAttribute("aria-expanded",
       String(document.body.classList.contains("sidebar-open")));
   };
-  $("#quick-settings-btn").onclick = () => switchTab("settings");
   $("#send-btn").onclick = () => streamChat();
   $("#stop-btn").onclick = stopChat;
   $("#attach-btn").onclick = () => $("#file-input").click();
@@ -1212,6 +1739,7 @@ function bind() {
     await loadStatus();
   };
   $("#set-theme").onchange = (e) => applyTheme(e.target.value);
+  $("#img-go").onclick = generateImage;
   
   // Input enter key
   $("#input").addEventListener("keydown", (e) => {
@@ -1293,37 +1821,75 @@ async function saveSettings() {
 }
 
 /* ---------------- resources & usage ---------------- */
+function setMetric(id, text, level) {
+  const element = $(id);
+  element.textContent = text;
+  element.dataset.level = level;
+}
+function metricLevel(value, warning = 60, danger = 80) {
+  if (!Number.isFinite(value)) return "unknown";
+  if (value >= danger) return "danger";
+  if (value >= warning) return "warn";
+  return "good";
+}
 async function loadResources() {
-  // Placeholder for real resource monitoring if available
-  $("#cpu-text").textContent = "-";
-  $("#ram-text").textContent = "-";
-  $("#gpu-text").textContent = "-";
-  $("#disk-text").textContent = "-";
+  try {
+    const data = await api("/api/system/resources");
+    const gpu = data.gpu || {};
+    const toMetric = (value) => value == null || value === "" ? NaN : Number(value);
+    const cpu = toMetric(data.cpu_percent);
+    const ram = toMetric(data.ram_percent);
+    const gpuUtil = toMetric(gpu.utilization_percent);
+    const gpuMemory = toMetric(gpu.memory_percent);
+    const gpuTemp = toMetric(gpu.temperature_c);
+    setMetric("#metric-cpu", `CPU ${Number.isFinite(cpu) ? `${cpu.toFixed(0)}%` : "—"}`,
+      metricLevel(cpu));
+    setMetric("#metric-ram", `RAM ${Number.isFinite(ram) ? `${ram.toFixed(0)}%` : "—"}`,
+      metricLevel(ram));
+    setMetric("#metric-gpu-util",
+      `GPU ${gpu.available && Number.isFinite(gpuUtil) ? `${gpuUtil.toFixed(0)}%` : "—"}`,
+      metricLevel(gpuUtil));
+    setMetric("#metric-gpu-vram",
+      `GPU RAM ${gpu.available && Number.isFinite(gpuMemory)
+        ? `${gpuMemory.toFixed(0)}% (${gpu.used_mb}/${gpu.total_mb} MB)` : "—"}`,
+      metricLevel(gpuMemory));
+    setMetric("#metric-gpu-temp",
+      `GPU Temp ${gpu.available && Number.isFinite(gpuTemp) ? `${gpuTemp.toFixed(0)}°C` : "—"}`,
+      metricLevel(gpuTemp, 70, 85));
+  } catch (e) {
+    console.warn("Could not refresh system resource metrics", e);
+  }
 }
 async function loadUsage() {
   try {
     const d = await api("/api/usage");
-    $("#stat-projects").textContent = `${d.projects} projects`;
-    $("#stat-chats").textContent = `${d.messages} messages`;
-    $("#stat-tokens").textContent = `tokens: ${d.tokens?.toLocaleString() || "-"}`;
+    const projects = d.projects?.total ?? 0;
+    const chats = d.chats?.total ?? 0;
+    const messages = d.chats?.total_messages ?? 0;
+    $("#stat-projects").textContent = `${projects} projects`;
+    $("#stat-chats").textContent = `${chats} chats · ${messages} messages`;
     $("#stat-model").textContent = `model: ${d.model || "-"}`;
     $("#runtime-usage").textContent =
-      `${d.projects} projects · ${d.messages} messages · ${d.tokens?.toLocaleString() || "-"} tokens`;
-  } catch (_) {}
+      `Projects ${projects} · Chat windows ${chats} · Messages ${messages}`;
+  } catch (e) {
+    console.warn("Could not refresh project usage", e);
+  }
 }
 function startPolling() {
+  if (state.polling) return;
+  state.polling = true;
   setInterval(async () => {
-    if (state.tab === "chat" && state.currentProject) {
-      // Optional: Poll for new messages if needed, but SSE is primary
+    if (!state.user) return;
+    try {
+      await Promise.all([loadResources(), loadUsage(), loadStatus()]);
+      if (state.tab === "models") {
+        const jobs = await api("/api/models/jobs");
+        if (jobs.jobs.some((job) => job.status === "downloading")) renderModels();
+      }
+    } catch (error) {
+      console.warn("Background refresh failed", error);
     }
-    if (state.tab === "models") {
-       // Refresh jobs if active
-       const jobs = await api("/api/models/jobs");
-       if (jobs.jobs.some(j => j.status === "downloading")) {
-         renderModels(); // Re-render to update progress bars
-       }
-    }
-  }, 2000);
+  }, 5000);
 }
 
 function debounce(fn, ms) {

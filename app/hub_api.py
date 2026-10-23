@@ -6,7 +6,6 @@ working regardless of hub library version. Supports HF_ENDPOINT mirrors.
 """
 from __future__ import annotations
 
-import fnmatch
 import json
 import os
 import re
@@ -29,12 +28,6 @@ from .config import CONFIG, DATA_DIR
 
 DEFAULT_ENDPOINT = "https://huggingface.co"
 CACHE_PATH = DATA_DIR / "hub_metadata_cache.json"
-
-IGNORE_PATTERNS = [
-    "*.msgpack", "*.h5", "*.ot", "*.onnx", "*.tflite", "*.pb",
-    "flax_model*", "original/*", "*.pth", "*.ckpt", "*.ipynb",
-]
-WEIGHT_SUFFIXES = (".safetensors", ".gguf", ".bin", ".pt", ".onnx", ".tflite")
 
 _lock = threading.RLock()
 _cache: dict = {}
@@ -406,11 +399,7 @@ def _one(raw: dict, deep: bool = False) -> dict:
             try:
                 siblings = _siblings(repo_id)
                 files = [s["name"] for s in siblings]
-                exact_bytes = sum(
-                    s["size"] for s in siblings
-                    if s["name"].lower().endswith(WEIGHT_SUFFIXES)
-                    and not any(fnmatch.fnmatch(s["name"], p) for p in IGNORE_PATTERNS)
-                )
+                exact_bytes = sum(s["size"] for s in siblings)
             except HubError:
                 pass
 
@@ -424,8 +413,9 @@ def _one(raw: dict, deep: bool = False) -> dict:
     kind = _kind(pipeline, tags, repo_id, arch)
     fmt = _format_of(tags, safetensors, arch, files)
 
-    size = exact_bytes if exact_bytes else int(raw.get("usedStorage") or 0)
-    estimated = not bool(exact_bytes)
+    hub_storage_bytes = int(raw.get("usedStorage") or 0)
+    size = exact_bytes or hub_storage_bytes
+    estimated = not bool(size)
     if not size:
         size = _estimate_bytes(params_b, kind, tags, repo_id)
 

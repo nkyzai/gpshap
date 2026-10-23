@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Gpshap</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <style>
     *, *::before, *::after { box-sizing: border-box; }
     html, body { height: 100%; }
@@ -114,7 +115,7 @@
       flex: 1 1 280px;
     }
 
-    .tabs, .top-actions, .project-actions, .composer-actions, .composer-options {
+    .tabs, .top-actions, .composer-actions, .composer-options {
       display: flex;
       gap: 6px;
       align-items: center;
@@ -164,7 +165,7 @@
       display: flex;
       flex-direction: column;
       gap: 8px;
-      max-width: 320px;
+      max-width: 430px;
     }
 
     #auth-panel input {
@@ -705,19 +706,65 @@
   <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
-  <div id="app">
+  <section id="splash-screen" class="splash-screen" aria-label="Gpshap introduction">
+    <div class="splash-mark" aria-hidden="true">GS</div>
+    <p class="splash-studio">A project of NKYZ AI STUDIOS</p>
+    <h1>AI for the humanity.</h1>
+    <p>Chats stay local unless you opt in to web search.</p>
+    <p class="small">Feedback is welcome.</p>
+  </section>
+
+  <main id="auth-screen" aria-labelledby="auth-title">
+    <section id="auth-panel" class="auth-card">
+      <div class="auth-brand">
+        <span class="logo" aria-hidden="true">GS</span>
+        <span>Gpshap</span>
+      </div>
+      <h1 id="auth-title">Sign in to your local workspace</h1>
+      <p class="small">Your account and conversations stay on this device.</p>
+      <form id="auth-form">
+        <label for="auth-username">Username</label>
+        <input id="auth-username" name="username" type="text" placeholder="Username"
+               autocomplete="username" minlength="3" maxlength="100" required>
+        <label for="auth-password">Password</label>
+        <input id="auth-password" name="password" type="password" placeholder="Password"
+               autocomplete="current-password" minlength="6" maxlength="200" required>
+        <p id="auth-error" class="auth-error hidden" role="alert"></p>
+        <div class="auth-actions">
+          <button id="login-btn" type="submit">Sign in</button>
+          <button id="register-btn" class="secondary" type="button">Create account</button>
+        </div>
+      </form>
+      <p class="small">First time here? Create an account to get started.</p>
+    </section>
+  </main>
+
+  <div id="app" class="hidden">
     <header id="topbar">
       <div class="brand">
         <span class="logo">GS</span>
         <strong>Gpshap</strong>
         <button id="sidebar-toggle" class="secondary sidebar-toggle" type="button"
-                aria-label="Toggle sidebar" aria-expanded="false">Menu</button>
+                aria-label="Toggle project sidebar" title="Toggle project sidebar"
+                aria-expanded="false">
+          <svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18" fill="none"
+               stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <path d="M4 6h16M4 12h16M4 18h16"/>
+          </svg>
+        </button>
       </div>
 
       <div class="top-status">
-        <span id="engine-badge" class="badge">engine: idle</span>
-        <span id="model-chip" class="badge">model</span>
         <select id="model-select" title="Active LLM"></select>
+        <div class="chat-options" role="group" aria-label="Chat options">
+          <label class="toggle"><input id="use-rag" type="checkbox" checked> RAG</label>
+          <label class="toggle"><input id="agent-mode" type="checkbox" checked> Agent</label>
+          <label class="toggle"><input id="voice-reply" type="checkbox"> Voice reply</label>
+          <label class="toggle" title="Only the current message is sent to DuckDuckGo when enabled.">
+            <input id="use-web" type="checkbox"> Web search
+          </label>
+          <span class="small web-privacy-note">Opt-in sends only this message to DuckDuckGo.</span>
+        </div>
       </div>
 
       <nav class="tabs">
@@ -728,48 +775,40 @@
       </nav>
 
       <div class="top-actions">
-        <button id="model-manage-btn" class="secondary" title="Open model hub">Manage</button>
-        <button id="theme-btn" title="Cycle theme">Theme</button>
-        <button id="quick-settings-btn" title="Quick settings">Gear</button>
+        <details id="user-menu" class="user-menu">
+          <summary id="profile-summary" aria-label="User profile">
+            <span class="profile-icon" aria-hidden="true">👤</span>
+            <span id="username-label">User</span>
+          </summary>
+          <div class="user-menu-panel">
+            <span id="profile-name" class="small"></span>
+            <button id="change-password-btn" class="secondary" type="button">Change password</button>
+            <button id="feedback-btn" class="secondary" type="button">Feedback</button>
+          </div>
+        </details>
         <button id="logout-btn" class="danger" title="Sign out">Logout</button>
       </div>
     </header>
 
     <aside id="sidebar">
-      <section id="auth-panel">
-        <h2>Sign in</h2>
-        <input id="auth-username" type="text" placeholder="Username" autocomplete="username">
-        <input id="auth-password" type="password" placeholder="Password" autocomplete="current-password">
-        <div class="row">
-          <button id="login-btn">Login</button>
-          <button id="register-btn" class="secondary">Register</button>
-        </div>
-        <p class="small">First run: Register creates your local account.</p>
-      </section>
-
       <section id="project-panel" class="hidden">
         <div id="side-chat">
           <div class="row space-between">
-            <strong>Projects</strong>
-            <button id="new-project-btn" class="tiny">+ Project</button>
-          </div>
-
-          <label class="small">
-            <input id="show-archived" type="checkbox">
-            Show archived
-          </label>
-
-          <div id="project-list" class="project-list"></div>
-
-          <div class="row space-between files-header">
-            <strong>Project files</strong>
+            <strong>Chats &amp; projects</strong>
             <div class="row">
-              <button id="files-upload-btn" class="tiny">Upload</button>
-              <button id="files-refresh-btn" class="tiny secondary">Refresh</button>
+              <button id="new-chat-btn" class="tiny" type="button">+ Chat</button>
+              <button id="new-project-btn" class="tiny secondary" type="button">+ Project</button>
             </div>
           </div>
 
-          <div id="file-list" class="file-list"></div>
+          <label class="small project-filter">
+            <input id="show-archived" type="checkbox">
+            Include archived projects
+          </label>
+
+          <div id="project-list" class="project-list"></div>
+          <button id="files-upload-btn" class="tiny secondary" type="button">Upload to selected project</button>
+          <div id="file-list" class="hidden"></div>
         </div>
 
         <div id="side-status" class="hidden">
@@ -803,7 +842,6 @@
           <h3>Usage</h3>
           <div id="stat-projects" class="small">0 projects</div>
           <div id="stat-chats" class="small">0 messages</div>
-          <div id="stat-tokens" class="small">tokens: -</div>
           <div id="stat-model" class="small">model: -</div>
         </div>
       </section>
@@ -815,34 +853,28 @@
           <div>
             <span id="current-project">Not signed in</span>
           </div>
-          <div class="project-actions">
-            <button id="project-rename" class="tiny secondary" title="Rename">Rename</button>
-            <button id="project-duplicate" class="tiny secondary" title="Duplicate">Copy</button>
-            <button id="project-export" class="tiny secondary" title="Export">Export</button>
-            <button id="project-move-up" class="tiny secondary" title="Move up">Up</button>
-            <button id="project-move-down" class="tiny secondary" title="Move down">Down</button>
-            <button id="project-pin" class="tiny secondary" title="Pin">Pin</button>
-            <button id="project-archive" class="tiny secondary" title="Archive">Archive</button>
-            <button id="project-clear" class="tiny secondary" title="Clear chat">Clear</button>
-            <button id="project-delete" class="tiny danger" title="Delete">Delete</button>
-          </div>
         </div>
 
         <div id="chat" class="chat"></div>
+        <div id="chat-empty-actions" class="chat-empty-actions hidden">
+          <button id="project-more-btn" class="icon-btn" type="button"
+                  aria-label="Project actions" title="Project actions">⋯</button>
+        </div>
 
         <div id="pending-attachments" class="pending-attachments hidden"></div>
 
         <footer class="composer">
-          <div class="composer-options">
-            <label class="small"><input id="use-rag" type="checkbox" checked> RAG</label>
-            <label class="small"><input id="agent-mode" type="checkbox" checked> Agent</label>
-            <label class="small"><input id="voice-reply" type="checkbox"> Voice reply</label>
-          </div>
-
           <textarea id="input" placeholder="Type a message..."></textarea>
 
           <div class="composer-actions">
-            <button id="attach-btn" title="Attach file">Attach</button>
+            <button id="attach-btn" class="icon-btn" type="button" title="Attach file"
+                    aria-label="Attach file">
+              <svg aria-hidden="true" viewBox="0 0 24 24" width="20" height="20" fill="none"
+                   stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+                   stroke-linejoin="round">
+                <path d="m21.4 11.1-8.5 8.5a5.5 5.5 0 0 1-7.8-7.8l9.2-9.2a3.7 3.7 0 0 1 5.2 5.2l-9.2 9.2a1.8 1.8 0 0 1-2.6-2.6l8.5-8.5"/>
+              </svg>
+            </button>
             <button id="send-btn">Send</button>
             <button id="stop-btn" class="stop-btn hidden" type="button">⏹ Stop</button>
           </div>
@@ -940,6 +972,7 @@
               <div class="bar"><div class="bar-fill"></div></div>
               <div id="img-step" class="small"></div>
             </div>
+            <p id="img-message" class="small" role="status" aria-live="polite"></p>
           </div>
 
           <div class="studio-out">
@@ -1070,13 +1103,60 @@
     </main>
 
     <footer id="runtime-statusbar" role="status" aria-live="polite">
-      <span id="runtime-engine">Engine: loading</span>
-      <span id="runtime-model">Model: —</span>
-      <span id="runtime-usage">Runtime status</span>
+      <span id="runtime-engine" class="status-item">Engine: loading</span>
+      <span id="metric-cpu" class="status-item" data-level="unknown">CPU —</span>
+      <span id="metric-ram" class="status-item" data-level="unknown">RAM —</span>
+      <span id="metric-gpu-util" class="status-item" data-level="unknown">GPU —</span>
+      <span id="metric-gpu-vram" class="status-item" data-level="unknown">GPU RAM —</span>
+      <span id="metric-gpu-temp" class="status-item" data-level="unknown">GPU Temp —</span>
+      <span id="runtime-usage" class="status-item">Projects — · Chats — · Messages —</span>
     </footer>
   </div>
 
   <div id="context-menu" class="hidden"></div>
+
+  <dialog id="resources-dialog" class="app-dialog">
+    <div class="dialog-header">
+      <div>
+        <h2 id="resources-title">Project resources</h2>
+        <p class="small">Files stay on this device and are not shown as previews.</p>
+      </div>
+      <button id="resources-close" class="secondary" type="button" aria-label="Close resources">Close</button>
+    </div>
+    <div id="resources-list" class="resource-list"></div>
+  </dialog>
+
+  <dialog id="password-dialog" class="app-dialog narrow-dialog">
+    <form id="password-form">
+      <div class="dialog-header">
+        <h2>Change password</h2>
+        <button id="password-close" class="secondary" type="button">Close</button>
+      </div>
+      <label for="current-password">Current password</label>
+      <input id="current-password" type="password" autocomplete="current-password" required>
+      <label for="new-password">New password</label>
+      <input id="new-password" type="password" autocomplete="new-password" minlength="6" required>
+      <label for="confirm-password">Confirm new password</label>
+      <input id="confirm-password" type="password" autocomplete="new-password" minlength="6" required>
+      <p id="password-error" class="auth-error hidden" role="alert"></p>
+      <button type="submit">Update password</button>
+    </form>
+  </dialog>
+
+  <dialog id="feedback-dialog" class="app-dialog narrow-dialog">
+    <form id="feedback-form">
+      <div class="dialog-header">
+        <h2>Share feedback</h2>
+        <button id="feedback-close" class="secondary" type="button">Close</button>
+      </div>
+      <label for="feedback-message">Your feedback</label>
+      <textarea id="feedback-message" rows="6" maxlength="4000"
+                placeholder="Tell us what works well or what could improve." required></textarea>
+      <p class="small">This opens a draft in your email app. Review and send it there; Gpshap does not send or store feedback.</p>
+      <p id="feedback-status" class="small" role="status"></p>
+      <button type="submit">Open email app</button>
+    </form>
+  </dialog>
 
   <input id="file-input" type="file" multiple class="hidden" accept="*/*">
 
