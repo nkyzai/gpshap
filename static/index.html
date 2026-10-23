@@ -4,7 +4,6 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Gpshap</title>
-  <link rel="stylesheet" href="/static/styles.css">
   <style>
     *, *::before, *::after { box-sizing: border-box; }
     html, body { height: 100%; }
@@ -67,7 +66,7 @@
     #app {
       height: 100vh;
       display: grid;
-      grid-template-columns: 360px minmax(0, 1fr);
+      grid-template-columns: 300px minmax(0, 1fr);
       grid-template-rows: auto minmax(0, 1fr);
       overflow: hidden;
     }
@@ -125,8 +124,8 @@
     #sidebar {
       grid-column: 1;
       grid-row: 2;
-      width: 360px;
-      max-width: 360px;
+      width: 300px;
+      max-width: 300px;
       overflow: auto;
       padding: 10px;
       border-right: 1px solid #243044;
@@ -666,6 +665,7 @@
     button.tiny { padding: 3px 7px; font-size: 12px; border-radius: 7px; }
     button.secondary { background: #0f172a; }
     button.danger { border-color: #7f1d1d; color: #fca5a5; }
+    button.stop-btn { border-color: #ef4444; color: #fca5a5; background: #450a0a; }
 
     select {
       padding: 6px 8px;
@@ -702,6 +702,7 @@
       #hub-table { min-width: 860px; }
     }
   </style>
+  <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
   <div id="app">
@@ -709,6 +710,8 @@
       <div class="brand">
         <span class="logo">GS</span>
         <strong>Gpshap</strong>
+        <button id="sidebar-toggle" class="secondary sidebar-toggle" type="button"
+                aria-label="Toggle sidebar" aria-expanded="false">Menu</button>
       </div>
 
       <div class="top-status">
@@ -839,9 +842,9 @@
           <textarea id="input" placeholder="Type a message..."></textarea>
 
           <div class="composer-actions">
-            <button id="voice-btn" title="Voice input">Mic</button>
             <button id="attach-btn" title="Attach file">Attach</button>
             <button id="send-btn">Send</button>
+            <button id="stop-btn" class="stop-btn hidden" type="button">⏹ Stop</button>
           </div>
         </footer>
       </section>
@@ -954,12 +957,11 @@
           <h2>Settings</h2>
 
           <h4>Appearance</h4>
-          <label>Theme</label>
+          <label for="set-theme">Layout theme</label>
           <select id="set-theme">
-            <option value="dark">Dark</option>
-            <option value="midnight">Midnight</option>
-            <option value="light">Light</option>
-            <option value="contrast">High Contrast</option>
+            <option value="oceanic">Oceanic Dashboard</option>
+            <option value="terminal">Terminal Hacker</option>
+            <option value="zen">Zen Minimalist</option>
           </select>
 
           <h4>Active models</h4>
@@ -1066,6 +1068,12 @@
         </div>
       </section>
     </main>
+
+    <footer id="runtime-statusbar" role="status" aria-live="polite">
+      <span id="runtime-engine">Engine: loading</span>
+      <span id="runtime-model">Model: —</span>
+      <span id="runtime-usage">Runtime status</span>
+    </footer>
   </div>
 
   <div id="context-menu" class="hidden"></div>

@@ -2,7 +2,6 @@ import json
 import os
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 DATA_DIR = ROOT / "data"
@@ -15,14 +14,12 @@ GENERATED_DIR = DATA_DIR / "generated"
 for _d in (DATA_DIR, UPLOAD_DIR, INDEX_DIR, STATIC_DIR, MODELS_DIR, GENERATED_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
-# ---- Keep every byte of model weight inside the project folder -------------
 os.environ["HF_HOME"] = str(MODELS_DIR)
 os.environ["HUGGINGFACE_HUB_CACHE"] = str(MODELS_DIR / "hub")
 os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-
 
 CONFIG_PATH = DATA_DIR / "config.json"
 
@@ -38,7 +35,7 @@ DEFAULT_CONFIG = {
     "image_model": "stabilityai/sd-turbo",
 
     # vision
-    "vision_mode": "auto",          # auto | vlm | caption | off
+    "vision_mode": "auto",
     "vision_auto_analyze": True,
 
     # diffusion
@@ -54,8 +51,8 @@ DEFAULT_CONFIG = {
     "top_p": 0.9,
     "top_k": 50,
     "repetition_penalty": 1.08,
-    "device": "auto",               # auto | cpu | cuda
-    "dtype": "auto",                # auto | float16 | bfloat16 | float32
+    "device": "auto",
+    "dtype": "auto",
 
     # rag
     "chunk_size": 900,
@@ -76,10 +73,9 @@ DEFAULT_CONFIG = {
     "active_backend": "transformers",
     "active_gguf_model": "",
     "active_model_path": "",
+    "gguf_n_ctx": 4096,
+    "gguf_n_gpu_layers": -1,
 }
-
-
-# In app/config.py, inside load_config(), add this check after loading stored config:
 
 def load_config() -> dict:
     config = DEFAULT_CONFIG.copy()
@@ -90,24 +86,13 @@ def load_config() -> dict:
                 config.update(stored)
         except Exception:
             pass
-    
-    # --- SANITIZATION LOGIC ---
-    # If user has a GGUF path in 'model' but backend is 'transformers', reset to default
-    current_model = config.get("model", "")
-    current_backend = config.get("active_backend", "transformers")
-    
-    if ".gguf" in str(current_model).lower() and current_backend == "transformers":
-        print(f"[gapshap] Warning: Detected GGUF model '{current_model}' with 'transformers' backend.", flush=True)
-        print("[gapshap] Auto-resetting to safe default model to prevent crash.", flush=True)
-        config["model"] = DEFAULT_CONFIG["model"] # Reset to Qwen2.5-1.5B
+    else:
         save_config(config)
-        
+    
     token = config.get("hf_token") or ""
     if token:
         os.environ["HF_TOKEN"] = token
-
     return config
-
 
 def save_config(config: dict) -> None:
     CONFIG_PATH.write_text(
@@ -115,20 +100,12 @@ def save_config(config: dict) -> None:
         encoding="utf-8",
     )
 
-
 def update_config(patch: dict) -> dict:
-    """Merge patch into config, persist, and return the fresh config."""
-    allowed_keys = set(DEFAULT_CONFIG.keys())
-    filtered_patch = {k: v for k, v in patch.items() if k in allowed_keys}
-    
-    CONFIG.update(filtered_patch)
+    CONFIG.update({k: v for k, v in patch.items() if k in DEFAULT_CONFIG})
     save_config(CONFIG)
-
     token = CONFIG.get("hf_token") or ""
     if token:
         os.environ["HF_TOKEN"] = token
-
     return CONFIG
-
 
 CONFIG = load_config()

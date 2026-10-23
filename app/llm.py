@@ -1,6 +1,7 @@
 import gc
 import threading
 import time
+from pathlib import Path
 from typing import Iterator
 
 import torch
@@ -19,6 +20,7 @@ _state = {
     "model_id": None,
     "model": None,
     "tokenizer": None,
+    "backend": None,
     "loaded_at": None,
     "params": 0,
 }
@@ -89,17 +91,90 @@ def unload() -> None:
         _state["model"] = None
         _state["tokenizer"] = None
         _state["model_id"] = None
+        _state["backend"] = None
+        _state["loaded_at"] = None
         _state["params"] = 0
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
 
+def load_gguf_model(model_path: str | None = None, force: bool = False):
+    model_path = (
+        model_path
+        or CONFIG.get("active_model_path")
+        or CONFIG.get("active_gguf_model")
+        or CONFIG.get("model", "")
+    )
+    path = Path(model_path).expanduser()
+    if not path.is_file() and not path.is_absolute():
+        from .config import MODELS_DIR
+        path = MODELS_DIR / path
+    path = path.resolve()
+    if path.suffix.lower() != ".gguf":
+        raise ValueError(f"Expected a GGUF model file, got: {path}")
+    if not path.is_file():
+        raise FileNotFoundError(f"GGUF model file not found: {path}")
+
+    with _lock:
+        if (not force and _state["model"] is not None
+                and _state["backend"] == "llama.cpp"
+                and _state["model_id"] == str(path)):
+            return _state["model"], None
+
+        unload()
+        try:
+            from llama_cpp import Llama
+        except ImportError as exc:
+            raise ImportError(
+                "llama-cpp-python is required to load GGUF models. "
+                "Install the project requirements and select a compatible build."
+            ) from exc
+
+        n_ctx = int(CONFIG.get("gguf_n_ctx", 4096))
+        n_gpu_layers = int(CONFIG.get("gguf_n_gpu_layers", -1))
+        print(f"[gapshap] loading GGUF {path} (n_ctx={n_ctx}, "
+              f"n_gpu_layers={n_gpu_layers})", flush=True)
+        t0 = time.time()
+        try:
+            model = Llama(
+                model_path=str(path),
+                n_ctx=n_ctx,
+                n_gpu_layers=n_gpu_layers,
+                verbose=False,
+            )
+        except Exception:
+            unload()
+            raise
+
+        _state.update({
+            "model_id": str(path),
+            "model": model,
+            "tokenizer": None,
+            "backend": "llama.cpp",
+            "loaded_at": time.time(),
+            "params": 0,
+        })
+        print(f"[gapshap] loaded GGUF {path} in {time.time() - t0:.1f}s", flush=True)
+        return model, None
+
+
 def load(model_id: str | None = None, force: bool = False):
     model_id = model_id or CONFIG["model"]
 
+    if (str(model_id).lower().endswith(".gguf")
+            or CONFIG.get("active_backend") in ("llama", "llama.cpp")):
+        if CONFIG.get("active_backend") in ("llama", "llama.cpp"):
+            gguf_path = (CONFIG.get("active_model_path")
+                         or CONFIG.get("active_gguf_model") or model_id)
+        else:
+            gguf_path = model_id
+        return load_gguf_model(gguf_path, force=force)
+
     with _lock:
-        if not force and _state["model"] is not None and _state["model_id"] == model_id:
+        if (not force and _state["model"] is not None
+                and _state["backend"] == "transformers"
+                and _state["model_id"] == model_id):
             return _state["model"], _state["tokenizer"]
 
         if _state["model"] is not None:
@@ -141,6 +216,7 @@ def load(model_id: str | None = None, force: bool = False):
             "model_id": model_id,
             "model": model,
             "tokenizer": tokenizer,
+            "backend": "transformers",
             "loaded_at": time.time(),
             "params": params,
         })
@@ -151,30 +227,57 @@ def load(model_id: str | None = None, force: bool = False):
 
 
 def ensure():
-    return load(CONFIG["model"])
+    return load()
 
 
 def warmup() -> None:
     try:
-        load(CONFIG["model"])
+        ensure()
     except Exception as exc:
         print(f"[gapshap] LLM warmup failed: {exc}", flush=True)
 
 
 def info() -> dict:
     model = _state["model"]
+    backend = _state["backend"] or (
+        "llama.cpp" if (
+            CONFIG.get("active_backend") in ("llama", "llama.cpp")
+            or str(CONFIG.get("model", "")).lower().endswith(".gguf")
+        )
+        else "transformers"
+    )
+    configured_model = (
+        CONFIG.get("active_gguf_model") or CONFIG.get("active_model_path")
+        if backend == "llama.cpp" else CONFIG.get("model")
+    )
+    llama_cuda_available = False
+    if backend == "llama.cpp" and model is not None:
+        from llama_cpp import llama_supports_gpu_offload
+        llama_cuda_available = (
+            llama_supports_gpu_offload()
+            and int(CONFIG.get("gguf_n_gpu_layers", -1)) != 0
+        )
     data = {
         "loaded": model is not None,
-        "model_id": _state["model_id"] or CONFIG["model"],
-        "configured_model": CONFIG["model"],
+        "model_id": _state["model_id"] or configured_model,
+        "configured_model": configured_model,
+        "backend": backend,
         "params_billion": round(_state["params"] / 1e9, 3) if _state["params"] else None,
-        "device": resolve_device(),
-        "cuda_available": torch.cuda.is_available(),
+        "device": (
+            ("cuda" if llama_cuda_available else "cpu")
+            if backend == "llama.cpp" else resolve_device()
+        ),
+        "cuda_available": (
+            llama_cuda_available if backend == "llama.cpp"
+            else torch.cuda.is_available()
+        ),
     }
-    if model is not None:
+    if model is not None and backend == "llama.cpp":
+        data["context_tokens"] = context_length()
+    elif model is not None:
         data["dtype"] = str(next(model.parameters()).dtype).replace("torch.", "")
         data["context_tokens"] = context_length()
-    if torch.cuda.is_available():
+    if backend == "transformers" and torch.cuda.is_available():
         data["vram_allocated_mb"] = round(torch.cuda.memory_allocated() / 1024 / 1024, 1)
         data["vram_reserved_mb"] = round(torch.cuda.memory_reserved() / 1024 / 1024, 1)
         try:
@@ -188,6 +291,8 @@ def context_length() -> int:
     model = _state["model"]
     if model is None:
         return 0
+    if _state["backend"] == "llama.cpp":
+        return int(model.n_ctx())
     cfg = getattr(model, "config", None)
     for attr in ("max_position_embeddings", "model_max_length", "max_sequence_length",
                  "seq_length", "n_positions"):
@@ -245,13 +350,35 @@ def generate_stream(
     """Yield text deltas. Blocking; call from a worker thread."""
     model, tokenizer = ensure()
 
-    prompt = build_prompt(messages, tools=tools)
     max_new_tokens = int(max_new_tokens or CONFIG.get("max_new_tokens", 768))
     temperature = float(CONFIG.get("temperature", 0.7)) if temperature is None else temperature
     top_p = float(CONFIG.get("top_p", 0.9)) if top_p is None else top_p
     top_k = int(CONFIG.get("top_k", 50))
     rep = float(CONFIG.get("repetition_penalty", 1.08))
 
+    if _state["backend"] == "llama.cpp":
+        generation = {
+            "messages": messages,
+            "max_tokens": max_new_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+            "top_k": top_k,
+            "repeat_penalty": rep,
+            "stop": [value for value in (stop or []) if value],
+            "stream": True,
+        }
+        with _gen_lock:
+            for chunk in model.create_chat_completion(**generation):
+                choices = chunk.get("choices", [])
+                if not choices:
+                    continue
+                delta = choices[0].get("delta", {})
+                text = delta.get("content")
+                if text:
+                    yield text
+        return
+
+    prompt = build_prompt(messages, tools=tools)
     inputs = tokenizer(prompt, return_tensors="pt")
     ctx = context_length() or 8192
     inputs["input_ids"] = _trim(inputs["input_ids"], max(512, ctx - max_new_tokens - 8))

@@ -22,9 +22,11 @@ wheels/
 
 # Virtual environments
 .venv/
+.venv312/
 venv/
 ENV/
 env/
+python312/
 
 # Environment / secrets
 .env

@@ -20,3 +20,4 @@ python-multipart
 httpx
 huggingface_hub>=1.5,<2.0
 psutil
+llama-cpp-python>=0.3,<0.4

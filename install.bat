@@ -51,52 +51,61 @@ if not exist "%PROJECT_ROOT%" mkdir "%PROJECT_ROOT%"
 cd /d "%PROJECT_ROOT%"
 
 echo ------------------------------------------------------------
-echo [1/9] Checking Python...
+echo [1/8] Installing Python 3.12...
 echo ------------------------------------------------------------
-set "PYTHON_FOUND="
-where py >nul 2>nul
-if %errorlevel%==0 (
-    py -3 --version >nul 2>nul
-    if %errorlevel%==0 set "PYTHON_FOUND=py"
+set "PYTHON_EXE=%PROJECT_ROOT%\python312\python.exe"
+curl.exe --fail --location --silent --show-error --output "%TEMP%\gapshap-python-3.12.10-amd64.exe" https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe
+if errorlevel 1 (
+    echo [ERROR] Could not download the official Python installer.
+    pause
+    exit /b 1
+)
+start /wait "" "%TEMP%\gapshap-python-3.12.10-amd64.exe" /quiet InstallAllUsers=0 TargetDir="%PROJECT_ROOT%\python312" Include_pip=1 Include_test=0 Include_launcher=0 PrependPath=0 Shortcuts=0
+if errorlevel 1 (
+    echo [ERROR] Python 3.12.10 installation failed.
+    del /q "%TEMP%\gapshap-python-3.12.10-amd64.exe" >nul 2>nul
+    pause
+    exit /b 1
+)
+del /q "%TEMP%\gapshap-python-3.12.10-amd64.exe" >nul 2>nul
+if not exist "%PYTHON_EXE%" (
+    echo [ERROR] Python installer completed but python.exe was not found in the project folder.
+    pause
+    exit /b 1
 )
 
-if not defined PYTHON_FOUND (
-    echo Python not found. Installing Python 3.12 via winget...
-    winget install -e --id Python.Python.3.12 --silent --accept-package-agreements --accept-source-agreements
-    if errorlevel 1 (
-        echo [ERROR] Could not install Python automatically.
-        echo Install Python 3.10+ manually, then run install.bat again.
-        pause
-        exit /b 1
-    )
-    set "PATH=%LOCALAPPDATA%\Programs\Python\Python312;%LOCALAPPDATA%\Programs\Python\Python312\Scripts;%PATH%"
-    where py >nul 2>nul
-    if errorlevel 1 (
-        echo [ERROR] Python installed but not visible to this shell.
-        echo Close this window and run install.bat again.
-        pause
-        exit /b 1
-    )
-    set "PYTHON_FOUND=py"
+"%PYTHON_EXE%" -c "import sys; print('Using Python', sys.version); raise SystemExit(0 if sys.version_info[:2] == (3, 12) and sys.maxsize.bit_length() == 63 else 1)"
+if errorlevel 1 (
+    echo [ERROR] The selected interpreter must be 64-bit Python 3.12.
+    pause
+    exit /b 1
 )
-py -3 --version
 
 echo ------------------------------------------------------------
-echo [2/9] Creating virtual environment...
+echo [2/8] Creating Python 3.12 virtual environment...
 echo ------------------------------------------------------------
-if not exist "%PROJECT_ROOT%\.venv\Scripts\python.exe" (
-    py -3 -m venv "%PROJECT_ROOT%\.venv"
-    if errorlevel 1 (
-        echo [ERROR] venv creation failed.
-        pause
-        exit /b 1
-    )
+"%PYTHON_EXE%" -m venv --clear "%PROJECT_ROOT%\.venv312"
+if errorlevel 1 (
+    echo [ERROR] Python 3.12 virtual environment creation failed.
+    pause
+    exit /b 1
 )
-call "%PROJECT_ROOT%\.venv\Scripts\activate.bat"
-python -m pip install --upgrade pip setuptools wheel
+set "VENV_PYTHON=%PROJECT_ROOT%\.venv312\Scripts\python.exe"
+"%VENV_PYTHON%" -c "import sys; print('Environment Python', sys.version); raise SystemExit(0 if sys.version_info[:2] == (3, 12) and sys.maxsize.bit_length() == 63 else 1)"
+if errorlevel 1 (
+    echo [ERROR] .venv312 is not running 64-bit Python 3.12. Re-run install.bat after checking the environment.
+    pause
+    exit /b 1
+)
+"%VENV_PYTHON%" -m pip install --upgrade pip setuptools wheel
+if errorlevel 1 (
+    echo [ERROR] Could not prepare pip in the Python 3.12 environment.
+    pause
+    exit /b 1
+)
 
 echo ------------------------------------------------------------
-echo [3/9] Creating project folders...
+echo [3/8] Creating project folders...
 echo ------------------------------------------------------------
 for %%D in (app static data uploads indexes scripts models "data\generated") do (
     if not exist "%PROJECT_ROOT%\%%~D" mkdir "%PROJECT_ROOT%\%%~D"
@@ -104,73 +113,107 @@ for %%D in (app static data uploads indexes scripts models "data\generated") do 
 if not exist "%PROJECT_ROOT%\app\__init__.py" type nul > "%PROJECT_ROOT%\app\__init__.py"
 
 echo ------------------------------------------------------------
-echo [4/9] Writing requirements.txt...
-echo ------------------------------------------------------------
->  "%PROJECT_ROOT%\requirements.txt" echo fastapi
->> "%PROJECT_ROOT%\requirements.txt" echo uvicorn[standard]
->> "%PROJECT_ROOT%\requirements.txt" echo transformers
->> "%PROJECT_ROOT%\requirements.txt" echo accelerate
->> "%PROJECT_ROOT%\requirements.txt" echo safetensors
->> "%PROJECT_ROOT%\requirements.txt" echo sentence-transformers
->> "%PROJECT_ROOT%\requirements.txt" echo faiss-cpu
->> "%PROJECT_ROOT%\requirements.txt" echo numpy
->> "%PROJECT_ROOT%\requirements.txt" echo tqdm
->> "%PROJECT_ROOT%\requirements.txt" echo diffusers
->> "%PROJECT_ROOT%\requirements.txt" echo ftfy
->> "%PROJECT_ROOT%\requirements.txt" echo einops
->> "%PROJECT_ROOT%\requirements.txt" echo timm
->> "%PROJECT_ROOT%\requirements.txt" echo pypdf
->> "%PROJECT_ROOT%\requirements.txt" echo python-docx
->> "%PROJECT_ROOT%\requirements.txt" echo pillow
->> "%PROJECT_ROOT%\requirements.txt" echo requests
->> "%PROJECT_ROOT%\requirements.txt" echo beautifulsoup4
->> "%PROJECT_ROOT%\requirements.txt" echo python-multipart
->> "%PROJECT_ROOT%\requirements.txt" echo httpx
->> "%PROJECT_ROOT%\requirements.txt" echo huggingface_hub
->> "%PROJECT_ROOT%\requirements.txt" echo psutil
-
-echo ------------------------------------------------------------
-echo [5/9] Installing PyTorch...
+echo [4/8] Installing PyTorch...
 echo ------------------------------------------------------------
 set "GPU_AVAILABLE=0"
 if "%FORCE_CPU%"=="0" (
     where nvidia-smi >nul 2>nul && set "GPU_AVAILABLE=1"
 )
+set "TORCH_CUDA_INSTALL=0"
 
 if "%GPU_AVAILABLE%"=="1" (
-    echo NVIDIA GPU detected - installing CUDA build...
-    python -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+    echo NVIDIA GPU detected - installing PyTorch CUDA 12.8 wheels for Python 3.12...
+    "%VENV_PYTHON%" -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
     if errorlevel 1 (
-        echo CUDA build failed - falling back to CPU build...
-        python -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+        echo CUDA wheel install failed - falling back to PyTorch CPU wheels...
+        "%VENV_PYTHON%" -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+        if errorlevel 1 (
+            echo [ERROR] PyTorch could not be installed for Python 3.12.
+            pause
+            exit /b 1
+        )
+    ) else (
+        set "TORCH_CUDA_INSTALL=1"
     )
 ) else (
+    set "TORCH_CUDA_INSTALL=0"
     echo No NVIDIA GPU ^(or --cpu^) - installing CPU build...
-    python -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+    "%VENV_PYTHON%" -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+    if errorlevel 1 (
+        echo [ERROR] PyTorch could not be installed for Python 3.12.
+        pause
+        exit /b 1
+    )
 )
-
-echo ------------------------------------------------------------
-echo [6/8] Installing gapshap Python dependencies + Llama.cpp (CUDA)...
-echo ------------------------------------------------------------
-
-REM Install standard deps first
-python -m pip install -r "%PROJECT_ROOT%\requirements.txt"
-
-REM Install llama-cpp-python with CUDA support
-REM This compiles it against your GPU. It takes 5-10 minutes on first run.
-echo Installing llama-cpp-python with CUDA support (this may take 5-10 mins)...
-set CMAKE_ARGS=-DLLAMA_CUBLAS=on
-python -m pip install llama-cpp-python --force-reinstall --no-cache-dir --verbose
-
+if "%TORCH_CUDA_INSTALL%"=="1" (
+    "%VENV_PYTHON%" -c "import torch; raise SystemExit(0 if torch.cuda.is_available() else 1)" >nul 2>nul
+    if errorlevel 1 (
+        echo PyTorch CUDA cannot access the GPU or driver. Reinstalling CPU PyTorch...
+        "%VENV_PYTHON%" -m pip install --force-reinstall torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+        if errorlevel 1 (
+            echo [ERROR] Could not install the PyTorch CPU fallback.
+            pause
+            exit /b 1
+        )
+        set "TORCH_CUDA_INSTALL=0"
+    )
+)
+"%VENV_PYTHON%" -c "import torch, sys; print('PyTorch', torch.__version__, 'on Python', sys.version.split()[0]); raise SystemExit(0 if sys.version_info[:2] == (3, 12) and sys.maxsize.bit_length() == 63 else 1)"
 if errorlevel 1 (
-    echo [WARNING] CUDA compilation failed. Falling back to CPU-only llama-cpp...
-    python -m pip install llama-cpp-python --force-reinstall --no-cache-dir
+    echo [ERROR] PyTorch verification failed in the Python 3.12 environment.
+    pause
+    exit /b 1
 )
 
-echo Dependencies installed.
+echo ------------------------------------------------------------
+echo [5/8] Installing gapshap Python dependencies + Llama.cpp...
+echo ------------------------------------------------------------
+
+REM Install dependencies using a prebuilt CPU llama.cpp wheel; never compile it with CMake here.
+"%VENV_PYTHON%" -m pip install --only-binary=llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu -r "%PROJECT_ROOT%\requirements.txt"
+if errorlevel 1 (
+    echo [ERROR] Dependencies failed to install. Confirm Python 3.12 x64 and internet access.
+    echo If the error mentions llama-cpp-python, check that its prebuilt wheel index is reachable.
+    pause
+    exit /b 1
+)
+
+if "%GPU_AVAILABLE%"=="1" (
+    echo Installing prebuilt llama.cpp CUDA 12.4 wheel...
+    "%VENV_PYTHON%" -m pip install --upgrade --no-deps --only-binary=llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124 "llama-cpp-python>=0.3,<0.4"
+    if errorlevel 1 (
+        echo [WARNING] CUDA wheel unavailable. Restoring the prebuilt CPU llama.cpp wheel...
+        "%VENV_PYTHON%" -m pip install --force-reinstall --no-deps --only-binary=llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu "llama-cpp-python>=0.3,<0.4"
+        if errorlevel 1 (
+            echo [ERROR] Could not install or restore the prebuilt CPU llama.cpp wheel.
+            pause
+            exit /b 1
+        )
+    ) else (
+        "%VENV_PYTHON%" -c "import llama_cpp" >nul 2>nul
+        if errorlevel 1 (
+            echo [WARNING] CUDA llama.cpp wheel failed import. Restoring the CPU wheel...
+            "%VENV_PYTHON%" -m pip install --force-reinstall --no-deps --only-binary=llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu "llama-cpp-python>=0.3,<0.4"
+            if errorlevel 1 (
+                echo [ERROR] Could not restore the prebuilt CPU llama.cpp wheel.
+                pause
+                exit /b 1
+            )
+        )
+    )
+)
+
+"%VENV_PYTHON%" -c "import torch, llama_cpp; print('Verified torch', torch.__version__, 'and llama.cpp', llama_cpp.__version__)"
+if errorlevel 1 (
+    echo [ERROR] Required PyTorch or llama.cpp module failed verification.
+    pause
+    exit /b 1
+)
+
+echo Dependencies installed and verified.
 
 echo ------------------------------------------------------------
-echo [7/9] Writing model bootstrap script...
+echo [6/8] Writing model bootstrap script...
 echo ------------------------------------------------------------
 >  "%PROJECT_ROOT%\scripts\download_models.py" echo import os
 >> "%PROJECT_ROOT%\scripts\download_models.py" echo from huggingface_hub import snapshot_download
@@ -189,35 +232,51 @@ echo ------------------------------------------------------------
 >> "%PROJECT_ROOT%\scripts\download_models.py" echo     except Exception as exc:
 >> "%PROJECT_ROOT%\scripts\download_models.py" echo         print("  FAILED:", repo, exc, flush=True)
 >> "%PROJECT_ROOT%\scripts\download_models.py" echo print("Bootstrap complete.", flush=True)
+if errorlevel 1 (
+    echo [ERROR] Could not create the model bootstrap script.
+    pause
+    exit /b 1
+)
 
 echo ------------------------------------------------------------
-echo [8/9] Downloading models into %PROJECT_ROOT%\models ...
+echo [7/8] Downloading models into %PROJECT_ROOT%\models ...
 echo ------------------------------------------------------------
 if "%DL_MODELS%"=="1" (
     set "GAPSHAP_DL_VISION=%DL_VISION%"
     set "GAPSHAP_DL_IMAGEGEN=%DL_IMAGEGEN%"
     echo This may take a while. You can also download models later from the
     echo "Models" tab inside the web UI ^(recommended - shows sizes first^).
-    python "%PROJECT_ROOT%\scripts\download_models.py"
+    "%VENV_PYTHON%" "%PROJECT_ROOT%\scripts\download_models.py"
+    if errorlevel 1 (
+        echo [ERROR] Model bootstrap script failed.
+        pause
+        exit /b 1
+    )
 ) else (
     echo Skipped model download ^(--no-models^). Use the Models tab in the UI.
 )
 
 echo ------------------------------------------------------------
-echo [9/9] Creating run.bat launcher...
+echo [8/8] Creating run.bat launcher...
 echo ------------------------------------------------------------
 >  "%PROJECT_ROOT%\run.bat" echo @echo off
 >> "%PROJECT_ROOT%\run.bat" echo setlocal
->> "%PROJECT_ROOT%\run.bat" echo cd /d "%PROJECT_ROOT%"
->> "%PROJECT_ROOT%\run.bat" echo set "HF_HOME=%PROJECT_ROOT%\models"
+>> "%PROJECT_ROOT%\run.bat" echo cd /d "%%~dp0"
+>> "%PROJECT_ROOT%\run.bat" echo set "HF_HOME=%%~dp0models"
 >> "%PROJECT_ROOT%\run.bat" echo set "PYTHONUTF8=1"
 >> "%PROJECT_ROOT%\run.bat" echo set "PYTHONUNBUFFERED=1"
->> "%PROJECT_ROOT%\run.bat" echo if not exist ".venv\Scripts\activate.bat" (
->> "%PROJECT_ROOT%\run.bat" echo   echo [ERROR] Virtual environment missing. Run install.bat first.
+>> "%PROJECT_ROOT%\run.bat" echo if not exist ".venv312\Scripts\python.exe" (
+>> "%PROJECT_ROOT%\run.bat" echo   echo [ERROR] Python 3.12 environment missing. Run install.bat first.
 >> "%PROJECT_ROOT%\run.bat" echo   pause
 >> "%PROJECT_ROOT%\run.bat" echo   exit /b 1
 >> "%PROJECT_ROOT%\run.bat" echo )
->> "%PROJECT_ROOT%\run.bat" echo call ".venv\Scripts\activate.bat"
+>> "%PROJECT_ROOT%\run.bat" echo call ".venv312\Scripts\activate.bat"
+>> "%PROJECT_ROOT%\run.bat" echo python -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 12) and sys.maxsize.bit_length() == 63 else 1)"
+>> "%PROJECT_ROOT%\run.bat" echo if errorlevel 1 ^(
+>> "%PROJECT_ROOT%\run.bat" echo   echo [ERROR] The active environment is not Python 3.12. Run install.bat.
+>> "%PROJECT_ROOT%\run.bat" echo   pause
+>> "%PROJECT_ROOT%\run.bat" echo   exit /b 1
+>> "%PROJECT_ROOT%\run.bat" echo ^)
 >> "%PROJECT_ROOT%\run.bat" echo title gapshap local AI server
 >> "%PROJECT_ROOT%\run.bat" echo start "" "http://127.0.0.1:8787"
 >> "%PROJECT_ROOT%\run.bat" echo python -m uvicorn app.main:app --host 127.0.0.1 --port 8787

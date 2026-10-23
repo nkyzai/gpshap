@@ -310,9 +310,14 @@ function resetDownloadUI(modelName) {
 
   async function useModel(m) {
     try {
+      const body = { model_id: m.id, kind: m.kind };
+      if (m.format === "gguf" || (m.id || "").toLowerCase().endsWith(".gguf")) {
+        const inventory = await api("/api/models/local");
+        Object.assign(body, inventory.gguf_config || {});
+      }
       const r = await api("/api/models/use", {
         method: "POST",
-        body: JSON.stringify({ model_id: m.id, kind: m.kind })
+        body: JSON.stringify(body)
       });
       showBanner(`ACTIVE ${r.field.toUpperCase()}: ${r.model}\n` +
         (r.llm ? `Loaded on ${r.llm.device} · ${r.llm.params_billion ?? "?"}B params · ` +
@@ -321,8 +326,8 @@ function resetDownloadUI(modelName) {
       if (window.loadStatus) await window.loadStatus();
     } catch (e) {
       showBanner("COULD NOT ACTIVATE\n\n" + e.message +
-        "\n\nNote: GGUF models require the llama.cpp backend (not yet enabled in this build). " +
-        "Choose a safetensors / transformers repository.", "error");
+        "\n\nGGUF models use llama.cpp. If llama-cpp-python is unavailable, install the project requirements " +
+        "and restart the app.", "error");
     }
   }
 
@@ -507,4 +512,3 @@ function resetDownloadUI(modelName) {
     "Click Diagnose if the table stays empty.",
     "info");
 })();
-

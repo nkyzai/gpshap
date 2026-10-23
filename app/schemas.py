@@ -32,6 +32,8 @@ class ModelDownloadRequest(BaseModel):
 class ModelUseRequest(BaseModel):
     model_id: str = Field(min_length=1)
     kind: str | None = None
+    gguf_n_ctx: int | None = Field(default=None, ge=512)
+    gguf_n_gpu_layers: int | None = Field(default=None, ge=-1)
 
 
 class ImageGenRequest(BaseModel):

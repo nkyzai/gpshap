@@ -112,8 +112,11 @@ def init_db() -> None:
                 model TEXT DEFAULT '',
                 created_at REAL NOT NULL
             );
+
             """
         )
+        conn.execute("DROP TABLE IF EXISTS chat_exports")
+        conn.execute("DROP TABLE IF EXISTS chat_export_consents")
 
         # 2. Safely upgrade schema for GGUF support
         # These lines will fail silently if columns already exist
