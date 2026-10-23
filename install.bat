@@ -51,42 +51,36 @@ if not exist "%PROJECT_ROOT%" mkdir "%PROJECT_ROOT%"
 cd /d "%PROJECT_ROOT%"
 
 echo ------------------------------------------------------------
-echo [1/8] Installing Python 3.12...
+echo [1/8] Installing project-local Python 3.12...
 echo ------------------------------------------------------------
-set "PYTHON_EXE=%PROJECT_ROOT%\python312\python.exe"
-curl.exe --fail --location --silent --show-error --output "%TEMP%\gapshap-python-3.12.10-amd64.exe" https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe
+set "PYTHON_ARCHIVE=%TEMP%\gapshap-python-3.12.10-amd64.zip"
+set "PYTHON_EXE=%PROJECT_ROOT%\python312\tools\python.exe"
+if not exist "%PROJECT_ROOT%\python312" mkdir "%PROJECT_ROOT%\python312"
+curl.exe --fail --location --silent --show-error --output "%PYTHON_ARCHIVE%" https://www.nuget.org/api/v2/package/python/3.12.10
 if errorlevel 1 (
-    echo [ERROR] Could not download the official Python installer.
+    echo [ERROR] Could not download the official Python 3.12.10 x64 package.
     pause
     exit /b 1
 )
-"%TEMP%\gapshap-python-3.12.10-amd64.exe" /passive /log "%TEMP%\gapshap-python-install.log" InstallAllUsers=0 TargetDir="%PROJECT_ROOT%\python312" DefaultJustForMeTargetDir="%PROJECT_ROOT%\python312" Include_exe=1 Include_lib=1 Include_pip=1 Include_test=0 Include_launcher=0 PrependPath=0 Shortcuts=0
-set "PYTHON_INSTALL_EXIT=%ERRORLEVEL%"
-if not "%PYTHON_INSTALL_EXIT%"=="0" (
-    echo [ERROR] Python 3.12.10 installation failed with exit code %PYTHON_INSTALL_EXIT%.
-    echo Installer log: %TEMP%\gapshap-python-install.log
-    del /q "%TEMP%\gapshap-python-3.12.10-amd64.exe" >nul 2>nul
+set "GAPSHAP_PYTHON_ARCHIVE=%PYTHON_ARCHIVE%"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Expand-Archive -LiteralPath $env:GAPSHAP_PYTHON_ARCHIVE -DestinationPath (Join-Path $env:PROJECT_ROOT 'python312') -Force"
+if errorlevel 1 (
+    echo [ERROR] Could not extract the Python 3.12.10 package.
+    del /q "%PYTHON_ARCHIVE%" >nul 2>nul
     pause
     exit /b 1
 )
-del /q "%TEMP%\gapshap-python-3.12.10-amd64.exe" >nul 2>nul
+del /q "%PYTHON_ARCHIVE%" >nul 2>nul
 if not exist "%PYTHON_EXE%" (
-    set "PYTHON_EXE="
-    for /r "%PROJECT_ROOT%\python312" %%P in (python.exe) do (
-        if not defined PYTHON_EXE set "PYTHON_EXE=%%~fP"
-    )
-)
-if not defined PYTHON_EXE (
-    echo [ERROR] Python installer returned success, but python.exe was not found under:
-    echo %PROJECT_ROOT%\python312
-    echo Installer log: %TEMP%\gapshap-python-install.log
+    echo [ERROR] Python package was extracted but python.exe was not found at:
+    echo %PYTHON_EXE%
     pause
     exit /b 1
 )
 
 "%PYTHON_EXE%" -c "import sys; print('Using Python', sys.version); raise SystemExit(0 if sys.version_info[:2] == (3, 12) and sys.maxsize.bit_length() == 63 else 1)"
 if errorlevel 1 (
-    echo [ERROR] The selected interpreter must be 64-bit Python 3.12.
+    echo [ERROR] Project-local Python must be 64-bit Python 3.12.
     pause
     exit /b 1
 )
