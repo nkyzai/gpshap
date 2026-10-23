@@ -60,16 +60,26 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
-start /wait "" "%TEMP%\gapshap-python-3.12.10-amd64.exe" /quiet InstallAllUsers=0 TargetDir="%PROJECT_ROOT%\python312" Include_pip=1 Include_test=0 Include_launcher=0 PrependPath=0 Shortcuts=0
-if errorlevel 1 (
-    echo [ERROR] Python 3.12.10 installation failed.
+"%TEMP%\gapshap-python-3.12.10-amd64.exe" /passive /log "%TEMP%\gapshap-python-install.log" InstallAllUsers=0 TargetDir="%PROJECT_ROOT%\python312" DefaultJustForMeTargetDir="%PROJECT_ROOT%\python312" Include_exe=1 Include_lib=1 Include_pip=1 Include_test=0 Include_launcher=0 PrependPath=0 Shortcuts=0
+set "PYTHON_INSTALL_EXIT=%ERRORLEVEL%"
+if not "%PYTHON_INSTALL_EXIT%"=="0" (
+    echo [ERROR] Python 3.12.10 installation failed with exit code %PYTHON_INSTALL_EXIT%.
+    echo Installer log: %TEMP%\gapshap-python-install.log
     del /q "%TEMP%\gapshap-python-3.12.10-amd64.exe" >nul 2>nul
     pause
     exit /b 1
 )
 del /q "%TEMP%\gapshap-python-3.12.10-amd64.exe" >nul 2>nul
 if not exist "%PYTHON_EXE%" (
-    echo [ERROR] Python installer completed but python.exe was not found in the project folder.
+    set "PYTHON_EXE="
+    for /r "%PROJECT_ROOT%\python312" %%P in (python.exe) do (
+        if not defined PYTHON_EXE set "PYTHON_EXE=%%~fP"
+    )
+)
+if not defined PYTHON_EXE (
+    echo [ERROR] Python installer returned success, but python.exe was not found under:
+    echo %PROJECT_ROOT%\python312
+    echo Installer log: %TEMP%\gapshap-python-install.log
     pause
     exit /b 1
 )
