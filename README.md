@@ -94,7 +94,7 @@ After installation, run:
 .\run.bat
 ```
 
-The application opens in your browser at **[http://127.0.0.1:8787](http://127.0.0.1:8787)**. Keep the command window open while using Gpshap; closing it stops the local server.
+In few seconds, the application opens in your browser at **[http://127.0.0.1:8787](http://127.0.0.1:8787)**. Keep the command window open while using Gpshap; closing it stops the local server.
 
 ### 4. Create an account
 
