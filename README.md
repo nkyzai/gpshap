@@ -1,4 +1,4 @@
-# Gpshap
+# Gpshap by NKYZAI Studios
 
 ### Your local AI workspace for private chats, projects, documents, and image creation
 
@@ -91,7 +91,7 @@ The installer requires internet access and may take time, especially when downlo
 After installation, run:
 
 ```text
-run.bat
+.\run.bat
 ```
 
 The application opens in your browser at **[http://127.0.0.1:8787](http://127.0.0.1:8787)**. Keep the command window open while using Gpshap; closing it stops the local server.
