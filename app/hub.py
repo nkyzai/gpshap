@@ -151,11 +151,20 @@ def local_models() -> list[dict]:
     return models
 
 def browse(search: str = "", task: str = "all", sort: str = "downloads", 
-           limit: int = 40, deep: bool = False, force: bool = False) -> dict:
+           limit: int = 40, deep: bool = False, force: bool = False,
+           model_format: str = "all") -> dict:
     from . import hub_api
     try:
-        raw = hub_api.search_models(search, task, sort, limit)
+        supported_formats = {"all", "gguf", "transformers", "diffusers"}
+        if model_format not in supported_formats:
+            raise ValueError(f"Unsupported model format filter: {model_format}")
+        query = search
+        if model_format == "gguf" and "gguf" not in search.lower():
+            query = f"{search} gguf".strip()
+        raw = hub_api.search_models(query, task, sort, limit)
         enriched = hub_api.enrich_many(raw, deep=deep)
+        if model_format != "all":
+            enriched = [model for model in enriched if model["format"] == model_format]
         
         # Mark downloaded status
         for m in enriched:

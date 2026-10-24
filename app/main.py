@@ -703,11 +703,12 @@ def delete_file_route(file_id: int, user=Depends(auth.get_current_user)):
 def models_browse(search: str = "", q: str = "", task: str = "all",
                   sort: str = "downloads", limit: int = 40,
                   deep: bool = False, force: bool = False,
+                  model_format: str = "all",
                   user=Depends(auth.get_current_user)):
     try:
         return hub.browse(
             (q or search or "").strip(), task, sort,
-            max(1, min(int(limit), 100)), deep, force
+            max(1, min(int(limit), 100)), deep, force, model_format
         )
     except Exception as exc:
         raise HTTPException(502, f"{type(exc).__name__}: {exc}")
