@@ -1232,6 +1232,23 @@ async function loadModelSelect() {
 }
 const fmtBytes = (b) => !b ? "-" : b > 1024 ** 3 ? (b / 1024 ** 3).toFixed(2) + " GB" : (b / 1024 ** 2).toFixed(0) + " MB";
 const fmtCtx = (n) => !n ? "-" : n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + "k" : String(n);
+function modelMatchesFilters(model) {
+  const formatFilter = $("#hub-format").value;
+  const taskFilter = $("#hub-task").value;
+  const format = model.format || (
+    String(model.id || "").toLowerCase().endsWith(".gguf") ? "gguf" : ""
+  );
+  if (formatFilter !== "all" && format !== formatFilter) return false;
+  if (taskFilter === "all") return true;
+  if (model.pipeline_tag === taskFilter) return true;
+  const kindByTask = {
+    "text-generation": ["llm"],
+    "text-to-image": ["image"],
+    "image-text-to-text": ["vision"],
+    "feature-extraction": ["embedding"],
+  };
+  return (kindByTask[taskFilter] || []).includes(model.kind);
+}
 async function loadModels() {
   try {
     if (state.localOnly) {
@@ -1242,6 +1259,7 @@ async function loadModels() {
       const p = new URLSearchParams({
         search: $("#hub-search").value.trim(),
         task: $("#hub-task").value,
+        model_format: $("#hub-format").value,
         sort: $("#hub-sort").value,
         limit: "40",
         deep: $("#hub-deep").checked ? "true" : "false",
@@ -1250,6 +1268,7 @@ async function loadModels() {
       state.models = d.models;
       $("#disk-info").textContent = `disk free ${d.disk.free_gb} GB · models ${d.disk.models_gb} GB`;
     }
+    state.models = state.models.filter(modelMatchesFilters);
     state.models = state.models.filter(
       (model) => !state.dismissedModelJobs.has(model.id)
     );
@@ -1727,6 +1746,7 @@ function bind() {
   };
   $("#hub-search").oninput = debounce(loadModels, 500);
   $("#hub-task").onchange = loadModels;
+  $("#hub-format").onchange = loadModels;
   $("#hub-sort").onchange = loadModels;
   $("#hub-deep").onchange = loadModels;
   $("#unload-btn").onclick = async () => {
@@ -1826,6 +1846,15 @@ function setMetric(id, text, level) {
   element.textContent = text;
   element.dataset.level = level;
 }
+function setResourceMeter(textId, fillId, text, percent, level) {
+  const textElement = $(textId);
+  const fillElement = $(fillId);
+  textElement.textContent = text;
+  textElement.dataset.level = level;
+  fillElement.style.width = `${Number.isFinite(percent)
+    ? Math.max(0, Math.min(100, percent)) : 0}%`;
+  fillElement.dataset.level = level;
+}
 function metricLevel(value, warning = 60, danger = 80) {
   if (!Number.isFinite(value)) return "unknown";
   if (value >= danger) return "danger";
@@ -1839,9 +1868,59 @@ async function loadResources() {
     const toMetric = (value) => value == null || value === "" ? NaN : Number(value);
     const cpu = toMetric(data.cpu_percent);
     const ram = toMetric(data.ram_percent);
+    const disk = data.disk || {};
+    const diskPercent = toMetric(disk.percent);
     const gpuUtil = toMetric(gpu.utilization_percent);
     const gpuMemory = toMetric(gpu.memory_percent);
     const gpuTemp = toMetric(gpu.temperature_c);
+    const cpuText = Number.isFinite(cpu)
+      ? `${cpu.toFixed(0)}%` : "Unavailable";
+    const ramText = Number.isFinite(ram)
+      ? `${ram.toFixed(0)}% · ${data.ram_used_gb} / ${data.ram_total_gb} GB`
+      : "Unavailable";
+    const diskText = Number.isFinite(diskPercent)
+      ? `${disk.free_gb} GB free · ${disk.used_gb} / ${disk.total_gb} GB used`
+      : "Unavailable";
+    const gpuLabel = $("#gpu-label");
+    const gpuFill = $("#gpu-fill");
+    if (gpu.available) {
+      gpuLabel.textContent = gpu.name ? `GPU · ${gpu.name}` : "GPU";
+      const gpuParts = [];
+      if (Number.isFinite(gpuUtil)) gpuParts.push(`${gpuUtil.toFixed(0)}% use`);
+      if (Number.isFinite(gpuMemory) && Number.isFinite(Number(gpu.total_mb))) {
+        gpuParts.push(
+          `${(Number(gpu.used_mb) / 1024).toFixed(1)} / ${(Number(gpu.total_mb) / 1024).toFixed(1)} GB VRAM`
+        );
+      }
+      if (Number.isFinite(gpuTemp)) gpuParts.push(`${gpuTemp.toFixed(0)}°C`);
+      const gpuText = gpuParts.length ? gpuParts.join(" · ") : "Detected · telemetry unavailable";
+      const gpuUsage = Number.isFinite(gpuUtil) ? gpuUtil : gpuMemory;
+      setResourceMeter(
+        "#gpu-text",
+        "#gpu-fill",
+        gpuText,
+        gpuUsage,
+        metricLevel(gpuUsage),
+      );
+    } else {
+      gpuLabel.textContent = "GPU";
+      setResourceMeter(
+        "#gpu-text",
+        "#gpu-fill",
+        "Not detected or unavailable",
+        NaN,
+        "unknown",
+      );
+    }
+    setResourceMeter("#cpu-text", "#cpu-fill", cpuText, cpu, metricLevel(cpu));
+    setResourceMeter("#ram-text", "#ram-fill", ramText, ram, metricLevel(ram));
+    setResourceMeter(
+      "#disk-text",
+      "#disk-fill",
+      diskText,
+      diskPercent,
+      metricLevel(diskPercent),
+    );
     setMetric("#metric-cpu", `CPU ${Number.isFinite(cpu) ? `${cpu.toFixed(0)}%` : "—"}`,
       metricLevel(cpu));
     setMetric("#metric-ram", `RAM ${Number.isFinite(ram) ? `${ram.toFixed(0)}%` : "—"}`,
@@ -1858,6 +1937,14 @@ async function loadResources() {
       metricLevel(gpuTemp, 70, 85));
   } catch (e) {
     console.warn("Could not refresh system resource metrics", e);
+    for (const [textId, fillId] of [
+      ["#cpu-text", "#cpu-fill"],
+      ["#ram-text", "#ram-fill"],
+      ["#gpu-text", "#gpu-fill"],
+      ["#disk-text", "#disk-fill"],
+    ]) {
+      setResourceMeter(textId, fillId, "Unavailable", NaN, "unknown");
+    }
   }
 }
 async function loadUsage() {

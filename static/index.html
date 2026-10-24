@@ -60,6 +60,14 @@
       background: #38bdf8;
       transition: width 0.2s ease;
     }
+    .bar-fill[data-level="good"] { background: #22c55e; }
+    .bar-fill[data-level="warn"] { background: #f59e0b; }
+    .bar-fill[data-level="danger"] { background: #ef4444; }
+    .bar-fill[data-level="unknown"] { background: #64748b; }
+    .resource [data-level="good"] { color: #86efac; }
+    .resource [data-level="warn"] { color: #fcd34d; }
+    .resource [data-level="danger"] { color: #fca5a5; }
+    .resource [data-level="unknown"] { color: #94a3b8; }
     .status-ready { color: #86efac; }
     .status-downloading { color: #fbbf24; }
     .status-error { color: #fca5a5; }
@@ -821,22 +829,23 @@
 
           <h3>Resources</h3>
           <div class="resource">
-            <div class="row space-between"><span>CPU</span><span id="cpu-text">-</span></div>
+            <div class="row space-between"><span>CPU usage</span><span id="cpu-text" data-level="unknown">Checking…</span></div>
             <div class="bar"><div id="cpu-fill" class="bar-fill"></div></div>
           </div>
 
           <div class="resource">
-            <div class="row space-between"><span>RAM</span><span id="ram-text">-</span></div>
+            <div class="row space-between"><span>RAM used / total</span><span id="ram-text" data-level="unknown">Checking…</span></div>
             <div class="bar"><div id="ram-fill" class="bar-fill"></div></div>
           </div>
 
           <div class="resource">
-            <div class="row space-between"><span>GPU</span><span id="gpu-text">-</span></div>
+            <div class="row space-between"><span id="gpu-label">GPU usage / VRAM</span><span id="gpu-text" data-level="unknown">Checking…</span></div>
             <div class="bar"><div id="gpu-fill" class="bar-fill"></div></div>
           </div>
 
           <div class="resource">
-            <div class="row space-between"><span>Disk</span><span id="disk-text">-</span></div>
+            <div class="row space-between"><span>Disk space</span><span id="disk-text" data-level="unknown">Checking…</span></div>
+            <div class="bar"><div id="disk-fill" class="bar-fill"></div></div>
           </div>
 
           <h3>Usage</h3>
@@ -886,10 +895,16 @@
           <input id="hub-search" type="text" placeholder="Search Hugging Face: qwen, llama, gemma, deepseek, phi, hermes">
           <select id="hub-task">
             <option value="all">All</option>
-            <option value="text-generation">Chat / LLM</option>
-            <option value="image-text-to-text">Vision (VLM)</option>
-            <option value="feature-extraction">Embeddings (RAG)</option>
-            <option value="text-to-image">Image generation</option>
+            <option value="text-generation">Text to Text</option>
+            <option value="text-to-image">Text to Image</option>
+            <option value="image-text-to-text">Image + Text to Text</option>
+            <option value="feature-extraction">Embeddings</option>
+          </select>
+          <select id="hub-format" aria-label="Model format">
+            <option value="all">All formats</option>
+            <option value="gguf">GGUF</option>
+            <option value="transformers">Transformers</option>
+            <option value="diffusers">Diffusers</option>
           </select>
           <select id="hub-sort">
             <option value="downloads">Most downloads</option>
