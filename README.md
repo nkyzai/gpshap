@@ -94,7 +94,7 @@ After installation, run:
 .\run.bat
 ```
 
-In few seconds, the application opens in your browser at **[http://127.0.0.1:8787](http://127.0.0.1:8787)**. Keep the command window open while using Gpshap; closing it stops the local server.
+In few seconds, the application opens in your browser at **[http://127.0.0.1:8787](http://127.0.0.1:8787)**. For new users, it will download the local models to your PC so wait for 5-10 minutes depends on your internet speed. Keep the command window open while using Gpshap; closing it stops the local server.
 
 ### 4. Create an account
 
@@ -114,7 +114,7 @@ Register a local account from the sign-in screen, then sign in. Accounts and the
 
 1. Open **Models**.
 2. Browse available models or inspect the local model inventory.
-3. Download a Transformers model or choose a local `.gguf` file.
+3. Download a Transformers model or choose a local `.gguf` file based on your need.
 4. Select **Use** for the model you want, then return to Chat.
 
 GGUF models are run through llama.cpp. Model compatibility and performance vary by architecture, quantization, available RAM/VRAM, and llama.cpp wheel support.
