@@ -75,12 +75,12 @@ Installer options:
 
 | Command | Effect |
 | --- | --- |
-| `install.bat` | Set up dependencies and download the default text and embedding models. |
-| `install.bat --no-models` | Set up dependencies without bootstrapping models. Download models later in the Models page. |
-| `install.bat --vision` | Also download the optional vision model during setup. |
-| `install.bat --imagegen` | Also download the optional image-generation model during setup. |
-| `install.bat --all` | Also download the optional vision and image-generation models. |
-| `install.bat --cpu` | Install CPU-only PyTorch even if NVIDIA hardware is detected. |
+| `.\install.bat` | Set up dependencies and download the default text and embedding models. |
+| `.\install.bat --no-models` | Set up dependencies without bootstrapping models. Download models later in the Models page. |
+| `.\install.bat --vision` | Also download the optional vision model during setup. |
+| `.\install.bat --imagegen` | Also download the optional image-generation model during setup. |
+| `.\install.bat --all` | Also download the optional vision and image-generation models. |
+| `.\install.bat --cpu` | Install CPU-only PyTorch even if NVIDIA hardware is detected. |
 
 Options can be combined. For example, `install.bat --no-models --cpu` installs the CPU environment and defers model downloads.
 
